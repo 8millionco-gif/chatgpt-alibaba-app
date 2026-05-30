@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: chatgpt-alibaba-app
+    runtime: node
+    rootDir: chatgpt-alibaba-app
+    buildCommand: npm install
+    startCommand: node server.js
+    plan: free
+    envVars:
+      - key: OPENAI_MODEL
+        value: gpt-4.1-mini
+      - key: OPENAI_CHAT_COMPLETIONS_URL
+        value: https://api.openai.com/v1/chat/completions

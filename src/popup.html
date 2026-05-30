@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Buyer Chat Assistant</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>Buyer Assistant</h1>
+          <p id="status">현재 채팅을 읽을 준비가 됐습니다.</p>
+        </div>
+        <button id="settingsButton" class="icon-button" title="설정">⚙</button>
+      </header>
+
+      <section id="settingsPanel" class="panel hidden">
+        <label>
+          <span>AI API Endpoint</span>
+          <input id="apiEndpoint" type="url" placeholder="https://api.openai.com/v1/chat/completions">
+        </label>
+        <label>
+          <span>Model</span>
+          <input id="model" type="text" placeholder="gpt-4.1-mini">
+        </label>
+        <label>
+          <span>API Key</span>
+          <input id="apiKey" type="password" placeholder="sk-...">
+        </label>
+        <label>
+          <span>답변 언어</span>
+          <select id="language">
+            <option>English</option>
+            <option>Korean</option>
+            <option>Chinese</option>
+          </select>
+        </label>
+        <label>
+          <span>회사/상품 메모</span>
+          <textarea id="companyContext" rows="4" placeholder="주요 상품, MOQ, 배송 조건, 자주 쓰는 톤 등을 적어두세요."></textarea>
+        </label>
+        <button id="saveSettings" class="primary">설정 저장</button>
+      </section>
+
+      <section class="buyer-row">
+        <div>
+          <span class="label">현재 바이어</span>
+          <strong id="buyerName">-</strong>
+        </div>
+        <button id="scanButton" class="primary">대화 분석</button>
+      </section>
+
+      <section class="panel">
+        <h2>히스토리 요약</h2>
+        <textarea id="summary" class="summary-box" rows="14" placeholder="[현재 상태]
+- 
+
+[대화 흐름]
+- 
+
+[바이어 관심/조건]
+- 
+
+[결정/약속]
+- 
+
+[미해결]
+- 
+
+[다음 액션]
+- "></textarea>
+        <button id="saveSummary">요약 저장</button>
+      </section>
+
+      <section class="panel">
+        <h2>다음 대화 제안</h2>
+        <div id="suggestions" class="suggestions empty">아직 제안이 없습니다.</div>
+      </section>
+
+      <section class="panel compact">
+        <h2>확인할 것</h2>
+        <ul id="openItems"></ul>
+      </section>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

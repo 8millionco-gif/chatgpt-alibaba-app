@@ -1,0 +1,191 @@
+:root {
+  color-scheme: light;
+  font-family: Arial, "Noto Sans KR", sans-serif;
+  color: #172026;
+  background: #f5f7f8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  width: 100%;
+  min-width: 340px;
+  min-height: 100vh;
+  margin: 0;
+  background: #f5f7f8;
+}
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+}
+
+.topbar,
+.buyer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+h2 {
+  margin-bottom: 8px;
+  font-size: 14px;
+}
+
+#status {
+  margin-top: 4px;
+  color: #5d6b72;
+  font-size: 12px;
+}
+
+.panel,
+.buyer-row {
+  border: 1px solid #dfe6e9;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 12px;
+}
+
+.compact {
+  padding-bottom: 6px;
+}
+
+.hidden {
+  display: none;
+}
+
+label {
+  display: block;
+  margin-bottom: 10px;
+}
+
+label span,
+.label {
+  display: block;
+  margin-bottom: 4px;
+  color: #526068;
+  font-size: 12px;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  border: 1px solid #ccd6db;
+  border-radius: 6px;
+  padding: 8px;
+  color: #172026;
+  font: inherit;
+  font-size: 13px;
+}
+
+textarea {
+  resize: vertical;
+}
+
+.summary-box {
+  min-height: 300px;
+  background: #fbfcfc;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+button {
+  border: 1px solid #b8c5cc;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #172026;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  min-height: 34px;
+  padding: 7px 10px;
+}
+
+button:hover {
+  background: #edf3f5;
+}
+
+.primary {
+  border-color: #0f766e;
+  background: #0f766e;
+  color: #ffffff;
+}
+
+.primary:hover {
+  background: #0b625c;
+}
+
+.icon-button {
+  width: 34px;
+  padding: 0;
+  font-size: 16px;
+}
+
+.suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.suggestion {
+  border: 1px solid #dfe6e9;
+  border-radius: 8px;
+  padding: 10px;
+  background: #fbfcfc;
+}
+
+.suggestion p {
+  margin-bottom: 8px;
+  white-space: pre-wrap;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.suggestion strong {
+  display: block;
+  margin-bottom: 6px;
+  color: #0f766e;
+  font-size: 12px;
+}
+
+.buyer-text {
+  color: #172026;
+}
+
+.translation {
+  border-left: 3px solid #d9e5e8;
+  padding-left: 8px;
+  color: #526068;
+}
+
+.empty {
+  color: #68777f;
+  font-size: 13px;
+}
+
+ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+li {
+  margin-bottom: 6px;
+  font-size: 13px;
+}

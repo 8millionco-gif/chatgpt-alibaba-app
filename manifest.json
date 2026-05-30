@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Alibaba Buyer Chat Assistant",
+  "description": "Summarize buyer conversations and suggest next replies from the current Alibaba chat page.",
+  "version": "0.1.0",
+  "action": {
+    "default_title": "Buyer Chat Assistant"
+  },
+  "side_panel": {
+    "default_path": "src/popup.html"
+  },
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.alibaba.com/*",
+        "https://*.taobao.global/*",
+        "https://*.aliexpress.com/*"
+      ],
+      "js": ["src/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "host_permissions": [
+    "https://*.alibaba.com/*",
+    "https://*.taobao.global/*",
+    "https://*.aliexpress.com/*",
+    "https://api.openai.com/*",
+    "https://*.openai.com/*",
+    "https://*.alibabacloud.com/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "permissions": ["activeTab", "scripting", "sidePanel", "storage"]
+}
