@@ -41,6 +41,10 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, buildOpenApiSpec(getExternalBaseUrl(req)));
     }
 
+    if (routeKey === "GET /api/alibaba/oauth/callback") {
+      return sendOAuthCallback(res, url);
+    }
+
     if (url.pathname.startsWith("/api/")) {
       assertAuthorized(req);
     }
@@ -774,6 +778,23 @@ function sendJson(res, statusCode, payload) {
   res.end(JSON.stringify(payload, null, 2));
 }
 
+function sendOAuthCallback(res, url) {
+  const code = url.searchParams.get("code") || "";
+  const state = url.searchParams.get("state") || "";
+  const error = url.searchParams.get("error") || "";
+  const errorDescription = url.searchParams.get("error_description") || "";
+
+  const content = error
+    ? `<h1>Alibaba authorization failed</h1><p>${escapeHtml(error)}</p><p>${escapeHtml(errorDescription)}</p>`
+    : `<h1>Alibaba authorization received</h1>
+       <p>Copy this authorization code and exchange it for an access token in your backend setup flow.</p>
+       <pre>${escapeHtml(code || "No code parameter was returned.")}</pre>
+       ${state ? `<p>State: ${escapeHtml(state)}</p>` : ""}`;
+
+  res.writeHead(error ? 400 : 200, { "Content-Type": "text/html; charset=utf-8" });
+  res.end(`<!doctype html><html><head><meta charset="utf-8"><title>Alibaba OAuth Callback</title></head><body>${content}</body></html>`);
+}
+
 function setCorsHeaders(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
@@ -797,6 +818,15 @@ function removeUndefined(value) {
 function clamp(value, min, max) {
   if (!Number.isFinite(value)) return min;
   return Math.min(Math.max(value, min), max);
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
 function loadEnvFile(filePath) {
