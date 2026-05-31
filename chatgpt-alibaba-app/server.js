@@ -18,7 +18,7 @@ const config = {
   alibabaAppSecret: process.env.ALIBABA_APP_SECRET || "",
   alibabaAccessToken: process.env.ALIBABA_ACCESS_TOKEN || "",
   alibabaRefreshToken: process.env.ALIBABA_REFRESH_TOKEN || "",
-  alibabaGateway: process.env.ALIBABA_GATEWAY || "https://api.taobao.com/router/rest",
+  alibabaGateway: process.env.ALIBABA_GATEWAY || "https://eco.taobao.com/router/rest",
   alibabaRestGateway: process.env.ALIBABA_REST_GATEWAY || "https://openapi-api.alibaba.com/rest",
   alibabaSelfAccountId: process.env.ALIBABA_SELF_ACCOUNT_ID || ""
 };
