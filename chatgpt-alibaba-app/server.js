@@ -17,6 +17,7 @@ const config = {
   alibabaAppSecret: process.env.ALIBABA_APP_SECRET || "",
   alibabaAccessToken: process.env.ALIBABA_ACCESS_TOKEN || "",
   alibabaGateway: process.env.ALIBABA_GATEWAY || "https://api.taobao.com/router/rest",
+  alibabaRestGateway: process.env.ALIBABA_REST_GATEWAY || "https://openapi-api.alibaba.com/rest",
   alibabaSelfAccountId: process.env.ALIBABA_SELF_ACCOUNT_ID || ""
 };
 
@@ -160,9 +161,9 @@ async function exchangeAlibabaCode(input = {}) {
     throw error;
   }
 
-  const response = await callAlibaba("taobao.top.auth.token.create", {
+  const response = await callAlibabaRest("/auth/token/create", {
     code
-  }, { includeSession: false });
+  });
 
   const token = findDeepValue(response, "access_token");
   const refreshToken = findDeepValue(response, "refresh_token");
@@ -172,7 +173,7 @@ async function exchangeAlibabaCode(input = {}) {
 
   return {
     ok: true,
-    source: "taobao.top.auth.token.create",
+    source: "/auth/token/create",
     access_token: token,
     refresh_token: refreshToken,
     user_id: userId,
@@ -457,6 +458,43 @@ async function callAlibaba(method, params = {}, options = {}) {
   return body;
 }
 
+async function callAlibabaRest(apiPath, params = {}) {
+  if (!config.alibabaAppKey || !config.alibabaAppSecret) {
+    const error = new Error("Alibaba app key/secret are not configured.");
+    error.statusCode = 503;
+    error.code = "ALIBABA_NOT_CONFIGURED";
+    throw error;
+  }
+
+  const cleanPath = apiPath.startsWith("/") ? apiPath : `/${apiPath}`;
+  const allParams = removeUndefined({
+    ...params,
+    app_key: config.alibabaAppKey,
+    sign_method: "sha256",
+    timestamp: String(Date.now())
+  });
+
+  allParams.sign = signIopParams(cleanPath, allParams, config.alibabaAppSecret);
+
+  const response = await fetch(`${config.alibabaRestGateway}${cleanPath}?${new URLSearchParams(allParams)}`, {
+    method: "GET",
+    headers: {
+      "Accept": "application/json"
+    }
+  });
+
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || body?.code && body.code !== "0") {
+    const error = new Error(body?.message || body?.msg || `Alibaba REST request failed with HTTP ${response.status}`);
+    error.statusCode = 502;
+    error.code = body?.code || "ALIBABA_REST_REQUEST_FAILED";
+    error.details = body;
+    throw error;
+  }
+
+  return body;
+}
+
 function signTopParams(params, secret) {
   const base = secret + Object.keys(params)
     .filter((key) => key !== "sign" && params[key] !== undefined && params[key] !== null)
@@ -465,6 +503,16 @@ function signTopParams(params, secret) {
     .join("") + secret;
 
   return crypto.createHash("md5").update(base, "utf8").digest("hex").toUpperCase();
+}
+
+function signIopParams(apiPath, params, secret) {
+  const signSource = apiPath + Object.keys(params)
+    .filter((key) => key !== "sign" && params[key] !== undefined && params[key] !== null)
+    .sort()
+    .map((key) => `${key}${String(params[key])}`)
+    .join("");
+
+  return crypto.createHmac("sha256", secret).update(signSource, "utf8").digest("hex").toUpperCase();
 }
 
 function buildOpenApiSpec(baseUrl = config.baseUrl) {
