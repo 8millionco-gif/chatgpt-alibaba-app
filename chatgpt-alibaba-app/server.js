@@ -475,7 +475,7 @@ function buildOpenApiSpec(baseUrl = config.baseUrl) {
       version: "0.1.0",
       description: "ChatGPT Actions API for Alibaba buyer summaries, product recommendations, product search, and order briefs."
     },
-    servers: [{ url: config.baseUrl }],
+    servers: [{ url: baseUrl }],
     components: {
       securitySchemes: {
         bearerAuth: {
