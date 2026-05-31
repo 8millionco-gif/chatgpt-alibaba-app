@@ -1,6 +1,6 @@
 # ChatGPT Alibaba Account Assistant
 
-ChatGPT Actions에 연결할 수 있는 Alibaba 계정 운영 비서 백엔드 MVP입니다. 현재 크롬 확장 프로그램과 별도로 동작하며, 나중에 같은 API를 ChatGPT Apps SDK UI나 기존 확장 프로그램에서 같이 사용할 수 있습니다.
+ChatGPT에 연결할 수 있는 Alibaba 계정 운영 비서 백엔드 MVP입니다. 기존 REST API와 함께 ChatGPT 앱/커넥터용 MCP 엔드포인트(`/mcp`)를 제공합니다.
 
 ## 할 수 있는 일
 
@@ -10,6 +10,7 @@ ChatGPT Actions에 연결할 수 있는 Alibaba 계정 운영 비서 백엔드 M
 - 바이어 대화 기반 추천 상품 리스트 생성
 - 상품 URL을 포함한 바이어용 공유 메시지 생성
 - 주문 목록 요약 API 뼈대 제공
+- ChatGPT 앱 커넥터용 MCP 도구 제공
 
 ## 실행
 
@@ -25,6 +26,7 @@ OPENAI_API_KEY=...
 ALIBABA_APP_KEY=...
 ALIBABA_APP_SECRET=...
 ALIBABA_ACCESS_TOKEN=...
+ALIBABA_REFRESH_TOKEN=...
 ALIBABA_SELF_ACCOUNT_ID=...
 ```
 
@@ -46,18 +48,61 @@ ChatGPT Actions 스키마:
 http://localhost:8787/openapi.json
 ```
 
-## ChatGPT에 연결하는 방법
+ChatGPT 앱/MCP 엔드포인트:
+
+```text
+http://localhost:8787/mcp
+```
+
+## ChatGPT 앱으로 연결하는 방법
+
+Render 배포 후 ChatGPT에서 아래 주소를 커넥터로 추가합니다.
+
+```text
+https://chatgpt-alibaba-app.onrender.com/mcp
+```
+
+흐름:
+
+```text
+ChatGPT Settings
+→ Apps & Connectors
+→ Advanced settings
+→ Developer mode 활성화
+→ Connectors에서 Create
+→ MCP URL에 https://chatgpt-alibaba-app.onrender.com/mcp 입력
+```
+
+새 채팅에서 `+` 또는 More 메뉴로 Alibaba Assistant 커넥터를 추가한 뒤 자연어로 요청합니다.
+
+예시:
+
+```text
+알리바바 연결 상태 확인해줘.
+화장품 관련 내 상품 5개 찾아줘.
+이 바이어 대화를 한국어로 요약하고 다음 답변을 추천해줘.
+```
+
+현재 MCP 도구:
+
+- `alibaba_connection_status`
+- `search_alibaba_products`
+- `summarize_buyer_conversation`
+- `recommend_products_for_buyer`
+
+## ChatGPT Actions로 연결하는 방법
 
 1. 이 서버를 HTTPS 주소로 배포합니다.
 2. `.env`의 `BASE_URL`을 배포 주소로 설정합니다.
 3. ChatGPT의 Custom GPT 또는 Actions 설정에서 `openapi.json` 주소를 가져옵니다.
 4. `APP_SHARED_SECRET`을 설정했다면 Actions 인증에 같은 Bearer 토큰을 넣습니다.
 
-로컬 주소는 ChatGPT가 직접 접근할 수 없으므로, 실제 연결에는 공개 HTTPS 주소가 필요합니다.
+로컬 주소는 ChatGPT가 직접 접근할 수 없으므로, 실제 연결에는 공개 HTTPS 주소가 필요합니다. ChatGPT 앱 방식에서는 `/openapi.json` 대신 `/mcp`를 사용합니다.
 
 ## 주요 엔드포인트
 
 - `GET /api/alibaba/status`
+- `POST /mcp`
 - `POST /api/products/search`
 - `POST /api/buyer/summary`
 - `POST /api/buyer/recommend-products`

@@ -2,7 +2,7 @@
   "name": "chatgpt-alibaba-app",
   "version": "0.1.0",
   "private": true,
-  "description": "ChatGPT Actions backend for managing Alibaba buyer conversations, products, and orders.",
+  "description": "ChatGPT Alibaba Assistant app backend with REST and MCP endpoints.",
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",

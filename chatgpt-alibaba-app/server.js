@@ -10,16 +10,20 @@ const config = {
   port: Number(process.env.PORT || 8787),
   baseUrl: process.env.BASE_URL || `http://localhost:${process.env.PORT || 8787}`,
   sharedSecret: process.env.APP_SHARED_SECRET || "",
+  mcpRequireAuth: String(process.env.MCP_REQUIRE_AUTH || "").toLowerCase() === "true",
   openaiApiKey: process.env.OPENAI_API_KEY || "",
   openaiModel: process.env.OPENAI_MODEL || "gpt-4.1-mini",
   openaiUrl: process.env.OPENAI_CHAT_COMPLETIONS_URL || "https://api.openai.com/v1/chat/completions",
   alibabaAppKey: process.env.ALIBABA_APP_KEY || "",
   alibabaAppSecret: process.env.ALIBABA_APP_SECRET || "",
   alibabaAccessToken: process.env.ALIBABA_ACCESS_TOKEN || "",
+  alibabaRefreshToken: process.env.ALIBABA_REFRESH_TOKEN || "",
   alibabaGateway: process.env.ALIBABA_GATEWAY || "https://api.taobao.com/router/rest",
   alibabaRestGateway: process.env.ALIBABA_REST_GATEWAY || "https://openapi-api.alibaba.com/rest",
   alibabaSelfAccountId: process.env.ALIBABA_SELF_ACCOUNT_ID || ""
 };
+
+const MCP_PROTOCOL_VERSION = "2025-06-18";
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -46,6 +50,10 @@ const server = http.createServer(async (req, res) => {
       return sendOAuthCallback(res, url);
     }
 
+    if (url.pathname === "/mcp") {
+      return handleMcpRequest(req, res);
+    }
+
     if (url.pathname.startsWith("/api/")) {
       assertAuthorized(req);
     }
@@ -56,6 +64,7 @@ const server = http.createServer(async (req, res) => {
         hasAppKey: Boolean(config.alibabaAppKey),
         hasAppSecret: Boolean(config.alibabaAppSecret),
         hasAccessToken: Boolean(config.alibabaAccessToken),
+        hasRefreshToken: Boolean(config.alibabaRefreshToken),
         hasSelfAccountId: Boolean(config.alibabaSelfAccountId),
         gateway: config.alibabaGateway
       });
@@ -102,10 +111,354 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(config.port, () => {
-  console.log(`ChatGPT Alibaba app backend running at ${config.baseUrl}`);
-  console.log(`OpenAPI schema: ${config.baseUrl}/openapi.json`);
-});
+function startServer(port = config.port) {
+  return server.listen(port, () => {
+    console.log(`ChatGPT Alibaba app backend running at ${config.baseUrl}`);
+    console.log(`OpenAPI schema: ${config.baseUrl}/openapi.json`);
+    console.log(`MCP endpoint: ${config.baseUrl}/mcp`);
+  });
+}
+
+if (require.main === module) {
+  startServer();
+}
+
+async function handleMcpRequest(req, res) {
+  setMcpHeaders(res);
+
+  if (config.mcpRequireAuth) {
+    assertAuthorized(req);
+  }
+
+  if (req.method === "GET") {
+    return sendJson(res, 200, {
+      ok: true,
+      service: "chatgpt-alibaba-app",
+      protocol: "mcp",
+      endpoint: "/mcp",
+      message: "Send JSON-RPC MCP requests with POST."
+    });
+  }
+
+  if (req.method === "DELETE") {
+    res.writeHead(202);
+    return res.end();
+  }
+
+  if (req.method !== "POST") {
+    res.writeHead(405, { "Content-Type": "application/json; charset=utf-8" });
+    return res.end(JSON.stringify({ error: "Method not allowed" }));
+  }
+
+  const payload = await readJson(req);
+  const isBatch = Array.isArray(payload);
+  const messages = isBatch ? payload : [payload];
+
+  if (isBatch && messages.length === 0) {
+    return sendJson(res, 400, jsonRpcError(null, -32600, "Invalid Request"));
+  }
+
+  const responses = [];
+  for (const message of messages) {
+    const response = await handleMcpMessage(message, req);
+    if (response) responses.push(response);
+  }
+
+  if (!responses.length) {
+    res.writeHead(202);
+    return res.end();
+  }
+
+  return sendJson(res, 200, isBatch ? responses : responses[0]);
+}
+
+async function handleMcpMessage(message, req) {
+  const id = message && Object.prototype.hasOwnProperty.call(message, "id") ? message.id : null;
+
+  if (!message || message.jsonrpc !== "2.0" || typeof message.method !== "string") {
+    return jsonRpcError(id, -32600, "Invalid Request");
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(message, "id")) {
+    return null;
+  }
+
+  try {
+    switch (message.method) {
+      case "initialize":
+        return jsonRpcResult(id, {
+          protocolVersion: message.params?.protocolVersion || MCP_PROTOCOL_VERSION,
+          capabilities: {
+            tools: { listChanged: false },
+            resources: { listChanged: false },
+            prompts: { listChanged: false }
+          },
+          serverInfo: {
+            name: "chatgpt-alibaba-assistant",
+            title: "ChatGPT Alibaba Assistant",
+            version: "0.1.0"
+          },
+          instructions: [
+            "Use this server to help a Korean Alibaba seller inspect connection status, search products, summarize buyer conversations, and suggest product/reply follow-ups.",
+            "Do not invent product URLs, prices, MOQ, delivery promises, or buyer facts. Use only returned Alibaba data or user-provided conversation text.",
+            "When drafting buyer-facing replies, include the buyer language version and a Korean translation."
+          ].join("\n")
+        });
+
+      case "ping":
+        return jsonRpcResult(id, {});
+
+      case "tools/list":
+        return jsonRpcResult(id, { tools: getMcpTools() });
+
+      case "tools/call":
+        return jsonRpcResult(id, await callMcpTool(message.params || {}));
+
+      case "resources/list":
+        return jsonRpcResult(id, { resources: [] });
+
+      case "prompts/list":
+        return jsonRpcResult(id, { prompts: [] });
+
+      default:
+        return jsonRpcError(id, -32601, `Method not found: ${message.method}`);
+    }
+  } catch (error) {
+    return jsonRpcResult(id, {
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: `요청 처리 중 오류가 발생했습니다: ${error.message}`
+        }
+      ],
+      structuredContent: {
+        ok: false,
+        error: error.message,
+        code: error.code || "MCP_TOOL_ERROR"
+      }
+    });
+  }
+}
+
+function getMcpTools() {
+  return [
+    {
+      name: "alibaba_connection_status",
+      title: "Alibaba connection status",
+      description: "Check whether the Alibaba API credentials and seller account identifiers are configured on the backend.",
+      inputSchema: {
+        type: "object",
+        properties: {}
+      },
+      annotations: {
+        readOnlyHint: true
+      }
+    },
+    {
+      name: "search_alibaba_products",
+      title: "Search Alibaba products",
+      description: "Search the seller's Alibaba products by keyword and return product titles, ids, images, and URLs when available.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          subject: {
+            type: "string",
+            description: "Product keyword or subject, for example cosmetic, pouch, bottle, or packaging."
+          },
+          page_size: {
+            type: "number",
+            minimum: 1,
+            maximum: 30,
+            description: "Number of products to return."
+          },
+          current_page: {
+            type: "number",
+            minimum: 1,
+            description: "Result page number."
+          },
+          language: {
+            type: "string",
+            description: "Alibaba product language value. Defaults to ENGLISH."
+          }
+        }
+      },
+      annotations: {
+        readOnlyHint: true
+      }
+    },
+    {
+      name: "summarize_buyer_conversation",
+      title: "Summarize buyer conversation",
+      description: "Summarize the full buyer conversation flow in Korean and list likely next actions.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          buyer_name: {
+            type: "string",
+            description: "Buyer name or account label."
+          },
+          conversation: {
+            type: "string",
+            description: "Conversation text copied from Alibaba chat or gathered by another client."
+          },
+          messages: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                sender: { type: "string" },
+                text: { type: "string" },
+                time: { type: "string" }
+              }
+            }
+          }
+        }
+      },
+      annotations: {
+        readOnlyHint: true
+      }
+    },
+    {
+      name: "recommend_products_for_buyer",
+      title: "Recommend products for buyer",
+      description: "Recommend seller products for a buyer based on conversation context and generate a buyer-language message with Korean translation.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          buyer_name: { type: "string" },
+          conversation: {
+            type: "string",
+            description: "Buyer conversation text."
+          },
+          product_query: {
+            type: "string",
+            description: "Keyword to search seller products with."
+          },
+          language: {
+            type: "string",
+            description: "Buyer language for the outgoing message, for example English, Spanish, Arabic, or Korean."
+          },
+          limit: {
+            type: "number",
+            minimum: 1,
+            maximum: 10
+          },
+          products: {
+            type: "array",
+            description: "Optional product candidates already known to the user or client.",
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string" },
+                title: { type: "string" },
+                url: { type: "string" },
+                image: { type: "string" },
+                keywords: { type: "array", items: { type: "string" } }
+              }
+            }
+          }
+        }
+      },
+      annotations: {
+        readOnlyHint: true
+      }
+    }
+  ];
+}
+
+async function callMcpTool(params = {}) {
+  const name = params.name || "";
+  const args = params.arguments || {};
+
+  switch (name) {
+    case "alibaba_connection_status":
+      return mcpToolResult({
+        configured: isAlibabaConfigured(),
+        hasAppKey: Boolean(config.alibabaAppKey),
+        hasAppSecret: Boolean(config.alibabaAppSecret),
+        hasAccessToken: Boolean(config.alibabaAccessToken),
+        hasRefreshToken: Boolean(config.alibabaRefreshToken),
+        hasSelfAccountId: Boolean(config.alibabaSelfAccountId),
+        gateway: config.alibabaGateway,
+        restGateway: config.alibabaRestGateway,
+        openaiConfigured: Boolean(config.openaiApiKey)
+      }, "Alibaba 연결 상태를 확인했습니다.");
+
+    case "search_alibaba_products":
+      return mcpToolResult(await searchProducts(args), "Alibaba 상품 검색 결과입니다.");
+
+    case "summarize_buyer_conversation":
+      return mcpToolResult(await summarizeBuyer(args), "바이어 대화 요약입니다.");
+
+    case "recommend_products_for_buyer":
+      return mcpToolResult(await recommendProducts(args), "바이어에게 제안할 상품과 메시지 초안입니다.");
+
+    default: {
+      const error = new Error(`Unknown tool: ${name}`);
+      error.code = "UNKNOWN_MCP_TOOL";
+      throw error;
+    }
+  }
+}
+
+function mcpToolResult(structuredContent, heading) {
+  return {
+    content: [
+      {
+        type: "text",
+        text: `${heading}\n\n${summarizeForMcpText(structuredContent)}`
+      }
+    ],
+    structuredContent
+  };
+}
+
+function summarizeForMcpText(value) {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return JSON.stringify(value);
+
+  if (value.summary) return String(value.summary);
+  if (Array.isArray(value.products)) {
+    if (!value.products.length) return "검색된 상품이 없습니다.";
+    return value.products.slice(0, 10).map((product, index) => {
+      const title = product.title || product.subject || product.id || "Untitled product";
+      const url = product.url ? ` - ${product.url}` : "";
+      return `${index + 1}. ${title}${url}`;
+    }).join("\n");
+  }
+  if (Array.isArray(value.recommendations)) {
+    if (!value.recommendations.length) return "추천할 상품 후보가 없습니다.";
+    return value.recommendations.slice(0, 10).map((product, index) => {
+      const title = product.title || product.subject || product.product_id || product.id || "Untitled product";
+      const reason = product.reason_ko ? ` (${product.reason_ko})` : "";
+      const url = product.url ? ` - ${product.url}` : "";
+      return `${index + 1}. ${title}${reason}${url}`;
+    }).join("\n");
+  }
+
+  return JSON.stringify(value, null, 2);
+}
+
+function jsonRpcResult(id, result) {
+  return {
+    jsonrpc: "2.0",
+    id,
+    result
+  };
+}
+
+function jsonRpcError(id, code, message, data) {
+  return {
+    jsonrpc: "2.0",
+    id,
+    error: removeUndefined({
+      code,
+      message,
+      data
+    })
+  };
+}
 
 async function searchProducts(input = {}) {
   const pageSize = clamp(Number(input.page_size || input.pageSize || 20), 1, 30);
@@ -908,8 +1261,15 @@ function sendOAuthCallback(res, url) {
 
 function setCorsHeaders(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization,x-api-key");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization,x-api-key,mcp-session-id,mcp-protocol-version");
+  res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
+}
+
+function setMcpHeaders(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
+  res.setHeader("MCP-Protocol-Version", MCP_PROTOCOL_VERSION);
 }
 
 function getExternalBaseUrl(req) {
@@ -939,6 +1299,15 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
 }
+
+module.exports = {
+  server,
+  startServer,
+  handleMcpMessage,
+  getMcpTools,
+  callMcpTool,
+  buildOpenApiSpec
+};
 
 function loadEnvFile(filePath) {
   if (!fs.existsSync(filePath)) return;
