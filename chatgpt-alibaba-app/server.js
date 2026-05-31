@@ -16,7 +16,7 @@ const config = {
   alibabaAppKey: process.env.ALIBABA_APP_KEY || "",
   alibabaAppSecret: process.env.ALIBABA_APP_SECRET || "",
   alibabaAccessToken: process.env.ALIBABA_ACCESS_TOKEN || "",
-  alibabaGateway: process.env.ALIBABA_GATEWAY || "https://eco.taobao.com/router/rest",
+  alibabaGateway: process.env.ALIBABA_GATEWAY || "https://api.taobao.com/router/rest",
   alibabaSelfAccountId: process.env.ALIBABA_SELF_ACCOUNT_ID || ""
 };
 
@@ -58,6 +58,12 @@ const server = http.createServer(async (req, res) => {
         hasSelfAccountId: Boolean(config.alibabaSelfAccountId),
         gateway: config.alibabaGateway
       });
+    }
+
+    if (routeKey === "POST /api/alibaba/oauth/token") {
+      const input = await readJson(req);
+      const result = await exchangeAlibabaCode(input);
+      return sendJson(res, 200, result);
     }
 
     if (routeKey === "POST /api/products/search") {
@@ -142,6 +148,40 @@ async function searchProducts(input = {}) {
     total: findDeepValue(response, "total_item") || products.length,
     currentPage,
     pageSize
+  };
+}
+
+async function exchangeAlibabaCode(input = {}) {
+  const code = input.code || input.authorization_code || input.authorizationCode || "";
+  if (!code) {
+    const error = new Error("Authorization code is required.");
+    error.statusCode = 400;
+    error.code = "MISSING_AUTHORIZATION_CODE";
+    throw error;
+  }
+
+  const response = await callAlibaba("taobao.top.auth.token.create", {
+    code
+  }, { includeSession: false });
+
+  const token = findDeepValue(response, "access_token");
+  const refreshToken = findDeepValue(response, "refresh_token");
+  const userId = findDeepValue(response, "user_id");
+  const userNick = findDeepValue(response, "user_nick");
+  const expireTime = findDeepValue(response, "expire_time");
+
+  return {
+    ok: true,
+    source: "taobao.top.auth.token.create",
+    access_token: token,
+    refresh_token: refreshToken,
+    user_id: userId,
+    user_nick: userNick,
+    expire_time: expireTime,
+    raw: response,
+    next_step: token
+      ? "Add access_token to Render as ALIBABA_ACCESS_TOKEN. Use user_id or user_nick to help identify the seller account."
+      : "Token fields were not found in the response. Check raw response."
   };
 }
 
@@ -465,6 +505,29 @@ function buildOpenApiSpec(baseUrl = config.baseUrl) {
           summary: "Check Alibaba API credential status",
           responses: {
             "200": { description: "Credential status" }
+          }
+        }
+      },
+      "/api/alibaba/oauth/token": {
+        post: {
+          operationId: "exchangeAlibabaAuthorizationCode",
+          summary: "Exchange an Alibaba authorization code for an access token",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["code"],
+                  properties: {
+                    code: { type: "string" }
+                  }
+                }
+              }
+            }
+          },
+          responses: {
+            "200": { description: "Alibaba access token response" }
           }
         }
       },
