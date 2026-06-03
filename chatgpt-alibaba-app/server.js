@@ -344,7 +344,7 @@ function getMcpTools() {
     {
       name: "recommend_products_for_buyer",
       title: "Recommend products for buyer",
-      description: "Recommend seller products for a buyer based on conversation context and generate a buyer-language message with Korean translation.",
+      description: "Recommend seller products for a buyer based on conversation context, then draft a buyer-facing reply with Korean translation and next follow-up questions.",
       inputSchema: {
         type: "object",
         properties: {
@@ -455,12 +455,25 @@ function summarizeForMcpText(value) {
   }
   if (Array.isArray(value.recommendations)) {
     if (!value.recommendations.length) return "추천할 상품 후보가 없습니다.";
-    return value.recommendations.slice(0, 10).map((product, index) => {
+    const productLines = value.recommendations.slice(0, 10).map((product, index) => {
       const title = product.title || product.subject || product.product_id || product.id || "Untitled product";
       const reason = product.reason_ko ? ` (${product.reason_ko})` : "";
       const url = product.url ? ` - ${product.url}` : "";
       return `${index + 1}. ${title}${reason}${url}`;
-    }).join("\n");
+    });
+    const draft = value.share_message || value.reply_draft || {};
+    const buyerMessage = draft.buyer_language ? `\n\n[바이어 답변]\n${draft.buyer_language}` : "";
+    const korean = draft.korean_translation ? `\n\n[한국어 번역]\n${draft.korean_translation}` : "";
+    const nextActions = Array.isArray(value.next_actions) && value.next_actions.length
+      ? `\n\n[다음 확인]\n${value.next_actions.map((action) => `- ${action}`).join("\n")}`
+      : "";
+    return [
+      "[추천 상품]",
+      ...productLines,
+      buyerMessage,
+      korean,
+      nextActions
+    ].filter(Boolean).join("\n");
   }
 
   return JSON.stringify(value, null, 2);
@@ -738,14 +751,19 @@ async function recommendProducts(input = {}) {
   const scoredProducts = scoreProducts(productSearch.products || [], needs).slice(0, Math.max(limit, 5));
 
   if (!config.openaiApiKey) {
+    const recommendations = scoredProducts.slice(0, limit);
+    const replyDraft = buildFallbackShareMessage(recommendations, language, needs);
     return {
       ok: true,
       source: "fallback",
       buyer_name: buyerName,
+      product_source: productSearch.source,
       needs,
-      recommendations: scoredProducts.slice(0, limit),
-      share_message: buildFallbackShareMessage(scoredProducts.slice(0, limit), language),
-      note: "OpenAI API key is not configured, so recommendations were ranked with local keyword matching."
+      recommendations,
+      next_actions: buildNextActions(needs),
+      share_message: replyDraft,
+      seller_note_ko: buildSellerNoteKo(needs, recommendations),
+      note: "OpenAI API key is not configured, so recommendations were ranked with local keyword matching. ChatGPT can refine the returned draft in the buyer language."
     };
   }
 
@@ -1218,32 +1236,49 @@ function buildOpenApiSpec(baseUrl = config.baseUrl) {
 
 function extractNeedsLocally(text) {
   const lower = String(text || "").toLowerCase();
+  const stopWords = new Set([
+    "hello", "please", "thanks", "thank", "price", "want", "need", "order", "product",
+    "products", "looking", "recommend", "initial", "quantity", "buyer", "seller", "with",
+    "for", "and", "the", "your", "our", "you", "are", "can", "would", "could", "send",
+    "about", "this", "that", "first", "item", "items", "interested"
+  ]);
   const keywords = Array.from(new Set(
     lower
       .replace(/https?:\/\/\S+/g, " ")
       .replace(/[^a-z0-9가-힣\s-]/gi, " ")
       .split(/\s+/)
       .filter((word) => word.length >= 3)
-      .filter((word) => !["hello", "please", "thanks", "price", "want", "need", "order", "product"].includes(word))
+      .filter((word) => !stopWords.has(word))
   )).slice(0, 12);
 
   const quantityMatch = lower.match(/\b\d{1,7}\s?(?:pcs|pieces|units|sets|개|ea)\b/i);
   const countryMatch = lower.match(/\b(?:usa|united states|korea|japan|china|germany|canada|australia|uk|india|vietnam|uae|saudi)\b/i);
+  const interestTerms = [
+    "blemish", "brightening", "whitening", "sensitive", "moisturizer", "cream", "serum",
+    "cleanser", "cleansing", "foam", "ampoule", "snail", "niacinamide", "aloe", "vegan",
+    "oem", "odm", "private label", "anti-aging", "wrinkle", "hydration", "acne"
+  ].filter((term) => lower.includes(term));
 
   return {
     keywords,
+    product_interest: interestTerms,
     quantity: quantityMatch?.[0] || "",
     country: countryMatch?.[0] || "",
     constraints: [
       lower.includes("sample") ? "sample requested" : "",
       lower.includes("moq") ? "MOQ mentioned" : "",
-      lower.includes("shipping") || lower.includes("delivery") ? "shipping/delivery mentioned" : ""
+      lower.includes("shipping") || lower.includes("delivery") ? "shipping/delivery mentioned" : "",
+      lower.includes("sensitive") ? "sensitive skin mentioned" : "",
+      lower.includes("private label") || lower.includes("oem") || lower.includes("odm") ? "OEM/ODM or private label mentioned" : ""
     ].filter(Boolean)
   };
 }
 
 function scoreProducts(products, needs) {
-  const keywords = new Set((needs.keywords || []).map((word) => word.toLowerCase()));
+  const keywords = new Set([
+    ...(needs.keywords || []),
+    ...(needs.product_interest || [])
+  ].map((word) => word.toLowerCase()));
   return products.map((product) => {
     const haystack = [
       product.title,
@@ -1268,18 +1303,62 @@ function scoreProducts(products, needs) {
   }).sort((a, b) => b.match_score - a.match_score);
 }
 
-function buildFallbackShareMessage(products, language) {
+function buildFallbackShareMessage(products, language, needs = {}) {
   const lines = products.map((product, index) => {
     const url = product.url ? ` ${product.url}` : "";
     return `${index + 1}. ${product.title || product.id}${url}`;
   });
+  const interest = (needs.product_interest || needs.keywords || []).slice(0, 5).join(", ") || "your requested skincare requirements";
+  const quantity = needs.quantity ? ` Your initial quantity of ${needs.quantity} is noted.` : "";
+  const country = needs.country ? ` We can also check shipping options for ${needs.country}.` : "";
+  const followUp = "Could you please confirm your preferred formula type, target price range, and whether you need OEM/ODM or private label service?";
+
+  const englishDraft = [
+    `Hello, thank you for your inquiry. Based on your interest in ${interest}, I recommend the following products:`,
+    lines.join("\n"),
+    `${quantity}${country}`.trim(),
+    followUp
+  ].filter(Boolean).join("\n\n");
+
+  const koreanDraft = [
+    `안녕하세요. 문의 주셔서 감사합니다. 바이어가 언급한 조건(${interest})을 기준으로 아래 상품을 추천드립니다:`,
+    lines.join("\n"),
+    needs.quantity ? `초도 수량 ${needs.quantity}도 함께 확인했습니다.` : "",
+    needs.country ? `${needs.country} 배송 가능 여부도 확인해볼 수 있습니다.` : "",
+    "희망 제형, 목표 가격대, OEM/ODM 또는 프라이빗 라벨 필요 여부를 확인해 달라는 답변입니다."
+  ].filter(Boolean).join("\n\n");
 
   return {
     buyer_language: language.toLowerCase().startsWith("ko")
-      ? `문의하신 내용에 맞춰 아래 제품을 추천드립니다.\n${lines.join("\n")}`
-      : `Based on your inquiry, I recommend these products:\n${lines.join("\n")}`,
-    korean_translation: `문의 내용에 맞춰 아래 제품을 추천한다는 메시지입니다.\n${lines.join("\n")}`
+      ? koreanDraft
+      : englishDraft,
+    korean_translation: koreanDraft,
+    buyer_language_note: language.toLowerCase().startsWith("ko")
+      ? "Buyer language is Korean."
+      : `Draft is in English. If the buyer language is ${language} and not English, ChatGPT should translate this draft before sending.`
   };
+}
+
+function buildNextActions(needs = {}) {
+  return [
+    needs.quantity ? "" : "초도 수량 또는 예상 월 주문 수량 확인",
+    needs.country ? "" : "배송 국가와 희망 납기 확인",
+    "목표 가격대와 MOQ 수용 가능 범위 확인",
+    "OEM/ODM 또는 프라이빗 라벨 필요 여부 확인",
+    "관심 상품 URL을 공유하고 샘플 필요 여부 확인"
+  ].filter(Boolean);
+}
+
+function buildSellerNoteKo(needs = {}, products = []) {
+  const interests = (needs.product_interest || needs.keywords || []).slice(0, 6).join(", ") || "명확한 키워드 없음";
+  const productCount = products.length;
+  return [
+    `감지된 관심 키워드: ${interests}`,
+    needs.quantity ? `수량: ${needs.quantity}` : "수량: 추가 확인 필요",
+    needs.country ? `국가: ${needs.country}` : "국가/배송지: 추가 확인 필요",
+    `추천 상품 수: ${productCount}`,
+    "가격, MOQ, 납기, 인증/성분 자료는 실제 판매 조건 확인 후 안내하세요."
+  ].join("\n");
 }
 
 function fallbackSummary(conversation) {
