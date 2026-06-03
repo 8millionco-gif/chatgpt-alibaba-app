@@ -27,6 +27,7 @@ const config = {
 };
 
 const MCP_PROTOCOL_VERSION = "2025-06-18";
+const APP_VERSION = "0.2.0";
 const TOKEN_REFRESH_SAFETY_MS = 5 * 60 * 1000;
 
 const tokenState = {
@@ -233,7 +234,7 @@ async function handleMcpMessage(message, req) {
           serverInfo: {
             name: "chatgpt-alibaba-assistant",
             title: "ChatGPT Alibaba Assistant",
-            version: "0.1.0"
+            version: APP_VERSION
           },
           instructions: [
             "Use this server to help a Korean Alibaba seller inspect connection status, search products, summarize buyer conversations, and suggest product/reply follow-ups.",
@@ -356,6 +357,20 @@ function getMcpTools() {
             type: "string",
             description: "Conversation text copied from Alibaba chat or gathered by another client."
           },
+          conversation_id: {
+            type: "string",
+            description: "Optional Alibaba IM conversation id. When provided, the server tries to fetch older messages from Alibaba before summarizing."
+          },
+          self_account_id: {
+            type: "string",
+            description: "Optional seller account id for IM lookup. Defaults to ALIBABA_SELF_ACCOUNT_ID."
+          },
+          max_pages: {
+            type: "number",
+            minimum: 1,
+            maximum: 10,
+            description: "Maximum IM message pages to fetch when conversation_id is provided."
+          },
           messages: {
             type: "array",
             items: {
@@ -475,6 +490,20 @@ function getMcpTools() {
           conversation: {
             type: "string",
             description: "Buyer conversation text."
+          },
+          conversation_id: {
+            type: "string",
+            description: "Optional Alibaba IM conversation id. When provided, the server tries to fetch older messages before recommending products."
+          },
+          self_account_id: {
+            type: "string",
+            description: "Optional seller account id for IM lookup. Defaults to ALIBABA_SELF_ACCOUNT_ID."
+          },
+          max_pages: {
+            type: "number",
+            minimum: 1,
+            maximum: 10,
+            description: "Maximum IM message pages to fetch when conversation_id is provided."
           },
           product_query: {
             type: "string",
@@ -1408,7 +1437,7 @@ function buildOpenApiSpec(baseUrl = config.baseUrl) {
     openapi: "3.1.0",
     info: {
       title: "Alibaba Account Assistant API",
-      version: "0.1.0",
+      version: APP_VERSION,
       description: "ChatGPT Actions API for Alibaba buyer summaries, product recommendations, product search, and order briefs."
     },
     servers: [{ url: baseUrl }],
