@@ -302,6 +302,23 @@ function getMcpTools() {
           language: {
             type: "string",
             description: "Alibaba product language value. Defaults to ENGLISH."
+          },
+          products: {
+            type: "array",
+            description: "Optional product list already fetched from Alibaba, useful for testing formatting without calling the API.",
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string" },
+                product_id: { type: "string" },
+                subject: { type: "string" },
+                title: { type: "string" },
+                pc_detail_url: { type: "string" },
+                url: { type: "string" },
+                status: { type: "string" },
+                display: { type: "string" }
+              }
+            }
           }
         }
       },
@@ -444,7 +461,25 @@ function summarizeForMcpText(value) {
   if (typeof value === "string") return value;
   if (!value || typeof value !== "object") return JSON.stringify(value);
 
-  if (value.summary) return String(value.summary);
+  if (Array.isArray(value.cards) || value.table_markdown || value.copy_block) {
+    const cards = Array.isArray(value.cards) ? value.cards : buildProductCards(value.products || []);
+    if (!cards.length) {
+      return value.note ? `검색된 상품이 없습니다.\n\n${value.note}` : "검색된 상품이 없습니다.";
+    }
+    const totalLine = Number.isFinite(Number(value.total))
+      ? `총 ${value.total}개 중 ${cards.length}개를 표시합니다.`
+      : `${cards.length}개 상품을 표시합니다.`;
+    const table = value.table_markdown || buildProductTableMarkdown(cards);
+    const copyBlock = value.copy_block || buildProductUrlCopyBlock(cards);
+    return [
+      totalLine,
+      "",
+      table,
+      "",
+      "[복사용 URL 목록]",
+      copyBlock
+    ].filter(Boolean).join("\n");
+  }
   if (Array.isArray(value.products)) {
     if (!value.products.length) return "검색된 상품이 없습니다.";
     return value.products.slice(0, 10).map((product, index) => {
@@ -475,6 +510,7 @@ function summarizeForMcpText(value) {
       nextActions
     ].filter(Boolean).join("\n");
   }
+  if (value.summary) return String(value.summary);
 
   return JSON.stringify(value, null, 2);
 }
@@ -505,20 +541,29 @@ async function searchProducts(input = {}) {
   const subject = input.subject || input.query || "";
 
   if (Array.isArray(input.products)) {
-    return {
+    const products = normalizeProducts(input.products).slice(0, pageSize);
+    return buildProductSearchResult({
       ok: true,
       source: "provided",
-      products: normalizeProducts(input.products).slice(0, pageSize)
-    };
+      products,
+      total: input.products.length,
+      currentPage,
+      pageSize,
+      query: { subject }
+    });
   }
 
   if (!isAlibabaConfigured()) {
-    return {
+    return buildProductSearchResult({
       ok: true,
       source: "not_configured",
       products: [],
+      total: 0,
+      currentPage,
+      pageSize,
+      query: { subject },
       note: "Alibaba credentials are not configured. Add ALIBABA_APP_KEY, ALIBABA_APP_SECRET, and ALIBABA_ACCESS_TOKEN or ALIBABA_REFRESH_TOKEN."
-    };
+    });
   }
 
   const params = {
@@ -537,14 +582,24 @@ async function searchProducts(input = {}) {
   const response = await callAlibabaRestWithAccessToken("/alibaba/icbu/product/list", params);
 
   const products = normalizeProducts(findDeepArray(response, "products"));
-  return {
+  return buildProductSearchResult({
     ok: true,
     source: "/alibaba/icbu/product/list",
     products,
     total: findDeepValue(response, "total_item") || findDeepValue(response, "total") || findDeepValue(response, "total_count") || products.length,
     currentPage,
-    pageSize
-  };
+    pageSize,
+    query: {
+      subject,
+      category_id: params.category_id,
+      group_id1: params.group_id1,
+      group_id2: params.group_id2,
+      group_id3: params.group_id3,
+      gmt_modified_from: params.gmt_modified_from,
+      gmt_modified_to: params.gmt_modified_to,
+      id: params.id
+    }
+  });
 }
 
 async function exchangeAlibabaCode(input = {}) {
@@ -1383,6 +1438,104 @@ function fallbackSummary(conversation) {
   ].join("\n");
 }
 
+function buildProductSearchResult(input = {}) {
+  const products = Array.isArray(input.products) ? input.products : [];
+  const cards = buildProductCards(products);
+  return removeUndefined({
+    ok: input.ok !== false,
+    source: input.source,
+    query: removeUndefined(input.query || {}),
+    total: input.total,
+    currentPage: input.currentPage,
+    pageSize: input.pageSize,
+    products,
+    cards,
+    share_urls: cards.map((card) => card.url).filter(Boolean),
+    table_markdown: buildProductTableMarkdown(cards),
+    copy_block: buildProductUrlCopyBlock(cards),
+    note: input.note
+  });
+}
+
+function buildProductCards(products = []) {
+  return products.map((product, index) => removeUndefined({
+    rank: index + 1,
+    product_id: product.product_id || product.id,
+    title: product.title || product.subject || product.product_id || product.id || "Untitled product",
+    url: product.url,
+    image: product.image,
+    status: product.status,
+    display: product.display,
+    status_label: formatProductStatus(product),
+    group_name: product.group_name,
+    category_id: product.category_id,
+    group_id: product.group_id,
+    product_type: product.product_type,
+    rts: product.rts,
+    specific: product.specific,
+    gmt_modified: product.gmt_modified,
+    badges: buildProductBadges(product),
+    keywords: Array.isArray(product.keywords) ? product.keywords.slice(0, 3) : []
+  }));
+}
+
+function buildProductBadges(product = {}) {
+  return [
+    product.status ? `Status: ${product.status}` : "",
+    product.display ? `Display: ${product.display}` : "",
+    product.group_name ? `Group: ${product.group_name}` : "",
+    product.product_type ? `Type: ${product.product_type}` : "",
+    product.rts === true ? "RTS" : "",
+    product.specific === true ? "Specific" : ""
+  ].filter(Boolean);
+}
+
+function buildProductTableMarkdown(products = []) {
+  const rows = products.slice(0, 10);
+  if (!rows.length) return "";
+  return [
+    "| 순서 | 상품명 | 상태 | 상품 ID | URL |",
+    "| -: | --- | --- | --- | --- |",
+    ...rows.map((product, index) => {
+      const title = escapeMarkdownTable(truncateText(product.title || product.subject || "Untitled product", 90));
+      const status = escapeMarkdownTable(product.status_label || formatProductStatus(product));
+      const productId = escapeMarkdownTable(product.product_id || product.id || "");
+      const url = escapeMarkdownTable(product.url || "");
+      return `| ${index + 1} | ${title} | ${status} | ${productId} | ${url} |`;
+    })
+  ].join("\n");
+}
+
+function buildProductUrlCopyBlock(products = []) {
+  return products
+    .filter((product) => product.url)
+    .slice(0, 10)
+    .map((product, index) => `${index + 1}. ${product.title || product.product_id || product.id}\n${product.url}`)
+    .join("\n\n");
+}
+
+function formatProductStatus(product = {}) {
+  const status = product.status ? capitalizeFirst(product.status) : "";
+  const display = product.display ? `Display ${product.display}` : "";
+  return [status, display].filter(Boolean).join(" / ") || "상태 없음";
+}
+
+function truncateText(value, maxLength) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 3)).trim()}...`;
+}
+
+function escapeMarkdownTable(value) {
+  return String(value || "").replace(/\|/g, "\\|").replace(/\r?\n/g, " ").trim();
+}
+
+function capitalizeFirst(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 function normalizeProducts(products = []) {
   return products.map((product) => {
     const images = product?.main_image?.images || product?.mainImage?.images || product?.images || [];
@@ -1396,6 +1549,18 @@ function normalizeProducts(products = []) {
       url: product.pc_detail_url || product.pcDetailUrl || product.url || "",
       status: product.status || "",
       display: product.display || "",
+      language: product.language || "",
+      category_id: product.category_id || product.categoryId || "",
+      group_id: product.group_id || product.groupId || "",
+      group_name: product.group_name || product.groupName || "",
+      owner_member: product.owner_member || product.ownerMember || "",
+      owner_member_display_name: product.owner_member_display_name || product.ownerMemberDisplayName || "",
+      gmt_create: product.gmt_create || product.gmtCreate || "",
+      gmt_modified: product.gmt_modified || product.gmtModified || "",
+      specific: product.specific,
+      rts: product.rts,
+      smart_edit: product.smart_edit || product.smartEdit,
+      product_type: product.product_type || product.productType || "",
       raw: product
     };
   }).filter((product) => product.title || product.id || product.url);
