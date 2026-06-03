@@ -124,6 +124,6 @@ ChatGPT Settings
 ## 주의
 
 - Alibaba `app_secret`, `access_token`은 브라우저 확장 프로그램이나 ChatGPT 프롬프트에 넣지 말고 서버 환경 변수에만 보관해야 합니다.
-- 상품 조회 API `alibaba.icbu.product.list`는 TOP/ICBU 게이트웨이 `https://eco.taobao.com/router/rest`를 사용합니다. 토큰 발급용 REST 게이트웨이 `https://openapi-api.alibaba.com/rest`와 다릅니다.
+- 상품 조회는 권한 승인된 REST API `/alibaba/icbu/product/list`를 `ALIBABA_REST_GATEWAY`로 호출합니다. `ALIBABA_GATEWAY`는 일부 기존 TOP 방식 API가 필요할 때 사용합니다.
 - 상품 수정, 주문 수정, 배송 처리 같은 쓰기 작업은 사용자 확인 단계를 둔 뒤 추가하는 것이 안전합니다.
 - 현재 MVP는 읽기/추천 중심입니다.

@@ -463,7 +463,6 @@ function jsonRpcError(id, code, message, data) {
 async function searchProducts(input = {}) {
   const pageSize = clamp(Number(input.page_size || input.pageSize || 20), 1, 30);
   const currentPage = clamp(Number(input.current_page || input.currentPage || 1), 1, 100);
-  const language = input.language || "ENGLISH";
   const subject = input.subject || input.query || "";
 
   if (Array.isArray(input.products)) {
@@ -483,23 +482,26 @@ async function searchProducts(input = {}) {
     };
   }
 
-  const response = await callAlibaba("alibaba.icbu.product.list", {
-    language,
+  const response = await callAlibabaRest("/alibaba/icbu/product/list", {
+    access_token: config.alibabaAccessToken,
     subject,
     current_page: currentPage,
     page_size: pageSize,
     category_id: input.category_id || input.categoryId || undefined,
     group_id1: input.group_id1 || input.groupId1 || undefined,
     group_id2: input.group_id2 || input.groupId2 || undefined,
-    group_id3: input.group_id3 || input.groupId3 || undefined
+    group_id3: input.group_id3 || input.groupId3 || undefined,
+    gmt_modified_from: input.gmt_modified_from || input.gmtModifiedFrom || undefined,
+    gmt_modified_to: input.gmt_modified_to || input.gmtModifiedTo || undefined,
+    id: input.id || input.product_id || input.productId || undefined
   });
 
   const products = normalizeProducts(findDeepArray(response, "products"));
   return {
     ok: true,
-    source: "alibaba.icbu.product.list",
+    source: "/alibaba/icbu/product/list",
     products,
-    total: findDeepValue(response, "total_item") || products.length,
+    total: findDeepValue(response, "total_item") || findDeepValue(response, "total") || findDeepValue(response, "total_count") || products.length,
     currentPage,
     pageSize
   };
