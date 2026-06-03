@@ -20,7 +20,10 @@ const config = {
   alibabaRefreshToken: process.env.ALIBABA_REFRESH_TOKEN || "",
   alibabaGateway: process.env.ALIBABA_GATEWAY || "https://eco.taobao.com/router/rest",
   alibabaRestGateway: process.env.ALIBABA_REST_GATEWAY || "https://openapi-api.alibaba.com/rest",
-  alibabaSelfAccountId: process.env.ALIBABA_SELF_ACCOUNT_ID || ""
+  alibabaSelfAccountId: process.env.ALIBABA_SELF_ACCOUNT_ID || "",
+  alibabaTopSignMethod: process.env.ALIBABA_TOP_SIGN_METHOD || "hmac",
+  alibabaImConversationListMethod: process.env.ALIBABA_IM_CONVERSATION_LIST_METHOD || "alibaba.interaction.im.conversation.list.query",
+  alibabaImMessageListMethod: process.env.ALIBABA_IM_MESSAGE_LIST_METHOD || "alibaba.interaction.im.message.list.query"
 };
 
 const MCP_PROTOCOL_VERSION = "2025-06-18";
@@ -107,6 +110,18 @@ const server = http.createServer(async (req, res) => {
     if (routeKey === "POST /api/buyer/summary") {
       const input = await readJson(req);
       const result = await summarizeBuyer(input);
+      return sendJson(res, 200, result);
+    }
+
+    if (routeKey === "POST /api/buyer/history") {
+      const input = await readJson(req);
+      const result = await fetchConversationHistory(input);
+      return sendJson(res, 200, result);
+    }
+
+    if (routeKey === "POST /api/buyer/conversations") {
+      const input = await readJson(req);
+      const result = await listImConversations(input);
       return sendJson(res, 200, result);
     }
 
@@ -359,6 +374,97 @@ function getMcpTools() {
       }
     },
     {
+      name: "list_alibaba_im_conversations",
+      title: "List Alibaba IM conversations",
+      description: "List recent Alibaba IM conversations for the configured seller account. Use this to find a conversation_id before fetching older messages.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          seller_account_id: {
+            type: "string",
+            description: "Seller account id or seller short code. Defaults to ALIBABA_SELF_ACCOUNT_ID."
+          },
+          count: {
+            type: "number",
+            minimum: 1,
+            maximum: 50,
+            description: "Number of conversations to return."
+          },
+          limit_time_stamp: {
+            type: "number",
+            description: "Millisecond timestamp used as the pagination anchor. Defaults to current time."
+          },
+          include_session: {
+            type: "boolean",
+            description: "Send Alibaba access token as TOP session. Defaults to false because this API is documented as not requiring authorization."
+          }
+        }
+      },
+      annotations: {
+        readOnlyHint: true
+      }
+    },
+    {
+      name: "fetch_alibaba_conversation_history",
+      title: "Fetch Alibaba conversation history",
+      description: "Fetch Alibaba IM messages by conversation_id, including older unloaded messages through timestamp pagination when available.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          conversation_id: {
+            type: "string",
+            description: "Alibaba IM conversation id."
+          },
+          self_account_id: {
+            type: "string",
+            description: "Bound seller account id. Defaults to ALIBABA_SELF_ACCOUNT_ID."
+          },
+          count: {
+            type: "number",
+            minimum: 1,
+            maximum: 100,
+            description: "Messages per page."
+          },
+          max_pages: {
+            type: "number",
+            minimum: 1,
+            maximum: 10,
+            description: "Maximum pages to fetch while has_more is true."
+          },
+          forward: {
+            type: "boolean",
+            description: "Alibaba query direction. false means toward earlier timestamps; true means toward later timestamps."
+          },
+          limit_time_stamp: {
+            type: "number",
+            description: "Millisecond timestamp used as the pagination anchor. Defaults to current time."
+          },
+          include_session: {
+            type: "boolean",
+            description: "Send Alibaba access token as TOP session. Defaults to false because this API is documented as not requiring authorization."
+          },
+          messages: {
+            type: "array",
+            description: "Optional messages for testing normalization without calling Alibaba.",
+            items: {
+              type: "object",
+              properties: {
+                sender: { type: "string" },
+                sender_account_id: { type: "string" },
+                content: { type: "string" },
+                text: { type: "string" },
+                send_time: { type: "number" },
+                time: { type: "string" }
+              }
+            }
+          }
+        }
+      },
+      annotations: {
+        readOnlyHint: true
+      }
+    },
+    {
       name: "recommend_products_for_buyer",
       title: "Recommend products for buyer",
       description: "Recommend seller products for a buyer based on conversation context, then draft a buyer-facing reply with Korean translation and next follow-up questions.",
@@ -434,6 +540,12 @@ async function callMcpTool(params = {}) {
     case "summarize_buyer_conversation":
       return mcpToolResult(await summarizeBuyer(args), "바이어 대화 요약입니다.");
 
+    case "list_alibaba_im_conversations":
+      return mcpToolResult(await listImConversations(args), "Alibaba IM 대화 목록입니다.");
+
+    case "fetch_alibaba_conversation_history":
+      return mcpToolResult(await fetchConversationHistory(args), "Alibaba IM 대화 히스토리입니다.");
+
     case "recommend_products_for_buyer":
       return mcpToolResult(await recommendProducts(args), "바이어에게 제안할 상품과 메시지 초안입니다.");
 
@@ -478,6 +590,37 @@ function summarizeForMcpText(value) {
       "",
       "[복사용 URL 목록]",
       copyBlock
+    ].filter(Boolean).join("\n");
+  }
+  if (Array.isArray(value.conversations)) {
+    if (!value.conversations.length) return value.note || "조회된 IM 대화가 없습니다.";
+    const rows = value.conversations.slice(0, 20).map((conversation, index) => {
+      const latest = conversation.latest_message_time_text || conversation.latest_message_time || "";
+      return `| ${index + 1} | ${escapeMarkdownTable(conversation.conversation_id)} | ${escapeMarkdownTable(latest)} |`;
+    });
+    return [
+      `총 ${value.conversations.length}개 대화를 표시합니다.`,
+      "",
+      "| 순서 | conversation_id | 최근 메시지 시간 |",
+      "| -: | --- | --- |",
+      ...rows,
+      value.has_more ? `\n다음 조회 기준 timestamp: ${value.next_time_stamp || ""}` : ""
+    ].filter(Boolean).join("\n");
+  }
+  if (Array.isArray(value.messages)) {
+    if (!value.messages.length) return value.note || "조회된 메시지가 없습니다.";
+    const lines = value.messages.slice(0, 80).map((message, index) => {
+      const time = message.time || message.send_time_text || message.send_time || "no time";
+      const sender = message.sender || message.sender_account_id || "unknown";
+      return `${index + 1}. [${time}] ${sender}: ${message.text || message.content || ""}`;
+    });
+    const pageNote = value.has_more ? `\n다음 조회 기준 timestamp: ${value.next_time_stamp || ""}` : "";
+    return [
+      `conversation_id: ${value.conversation_id || ""}`,
+      `총 ${value.messages.length}개 메시지를 표시합니다.`,
+      "",
+      ...lines,
+      pageNote
     ].filter(Boolean).join("\n");
   }
   if (Array.isArray(value.products)) {
@@ -911,33 +1054,204 @@ async function buildConversationContext(input = {}) {
     ].filter(Boolean).join("\n");
   }
 
-  const apiMessages = await getImMessages({
-    conversationId,
+  const history = await fetchConversationHistory({
+    conversation_id: conversationId,
+    self_account_id: input.self_account_id || input.selfAccountId,
     count: input.message_count || input.messageCount || 50,
+    max_pages: input.max_pages || input.maxPages || 1,
     forward: input.forward,
-    limitTimeStamp: input.limit_time_stamp || input.limitTimeStamp
+    limit_time_stamp: input.limit_time_stamp || input.limitTimeStamp,
+    include_session: input.include_session || input.includeSession
   });
 
   return [
     manualText,
     manualMessages.map(formatMessage).join("\n"),
-    apiMessages.map(formatMessage).join("\n")
+    (history.messages || []).map(formatMessage).join("\n")
   ].filter(Boolean).join("\n");
 }
 
-async function getImMessages(input = {}) {
-  if (!isAlibabaConfigured()) return [];
-  if (!config.alibabaSelfAccountId && !input.selfAccountId) return [];
+async function listImConversations(input = {}) {
+  const count = clamp(Number(input.count || 20), 1, 50);
+  const sellerAccountId = input.seller_account_id || input.sellerAccountId || config.alibabaSelfAccountId;
+  const limitTimeStamp = normalizeTimestamp(input.limit_time_stamp || input.limitTimeStamp || Date.now());
 
-  const response = await callAlibaba("alibaba.interaction.im.message.list.query", {
+  if (Array.isArray(input.conversations)) {
+    return {
+      ok: true,
+      source: "provided",
+      request: { seller_account_id: sellerAccountId, count, limit_time_stamp: limitTimeStamp },
+      conversations: normalizeConversations(input.conversations),
+      has_more: Boolean(input.has_more || input.hasMore),
+      next_time_stamp: input.next_time_stamp || input.nextTimeStamp || ""
+    };
+  }
+
+  if (!isAlibabaConfigured()) {
+    return {
+      ok: true,
+      source: "not_configured",
+      conversations: [],
+      note: "Alibaba credentials are not configured."
+    };
+  }
+
+  if (!sellerAccountId) {
+    return {
+      ok: true,
+      source: "missing_seller_account_id",
+      conversations: [],
+      note: "ALIBABA_SELF_ACCOUNT_ID or seller_account_id is required for IM conversation lookup."
+    };
+  }
+
+  const paramsDto = removeUndefined({
+    seller_account_id: sellerAccountId,
+    limit_time_stamp: limitTimeStamp,
+    count
+  });
+
+  const response = await callAlibaba(config.alibabaImConversationListMethod, {
+    params: JSON.stringify(paramsDto)
+  }, {
+    includeSession: parseBoolean(input.include_session ?? input.includeSession, false),
+    signMethod: input.sign_method || input.signMethod || config.alibabaTopSignMethod
+  });
+
+  return {
+    ok: true,
+    source: config.alibabaImConversationListMethod,
+    request: paramsDto,
+    conversations: normalizeConversations(findDeepArrayForKeys(response, ["conversation_d_t_o", "conversation_list", "conversations"])),
+    has_more: parseBoolean(findDeepValue(response, "has_more"), false),
+    next_time_stamp: findDeepValue(response, "next_time_stamp") || "",
+    raw: input.include_raw || input.includeRaw ? response : undefined
+  };
+}
+
+async function fetchConversationHistory(input = {}) {
+  const conversationId = input.conversation_id || input.conversationId || "";
+  const selfAccountId = input.self_account_id || input.selfAccountId || config.alibabaSelfAccountId;
+  const count = clamp(Number(input.count || input.message_count || input.messageCount || 50), 1, 100);
+  const maxPages = clamp(Number(input.max_pages || input.maxPages || 1), 1, 10);
+  const forward = parseBoolean(input.forward, false);
+  const includeSession = parseBoolean(input.include_session ?? input.includeSession, false);
+
+  if (Array.isArray(input.messages)) {
+    return buildConversationHistoryResult({
+      source: "provided",
+      conversationId,
+      request: { conversation_id: conversationId, count, max_pages: maxPages, forward },
+      messages: normalizeMessages(input.messages),
+      hasMore: Boolean(input.has_more || input.hasMore),
+      nextTimeStamp: input.next_time_stamp || input.nextTimeStamp || ""
+    });
+  }
+
+  if (!isAlibabaConfigured()) {
+    return buildConversationHistoryResult({
+      source: "not_configured",
+      conversationId,
+      request: { conversation_id: conversationId, count, max_pages: maxPages, forward },
+      messages: [],
+      note: "Alibaba credentials are not configured."
+    });
+  }
+
+  if (!conversationId) {
+    return buildConversationHistoryResult({
+      source: "missing_conversation_id",
+      conversationId,
+      request: { count, max_pages: maxPages, forward },
+      messages: [],
+      note: "conversation_id is required. First call list_alibaba_im_conversations to find it."
+    });
+  }
+
+  if (!selfAccountId) {
+    return buildConversationHistoryResult({
+      source: "missing_self_account_id",
+      conversationId,
+      request: { conversation_id: conversationId, count, max_pages: maxPages, forward },
+      messages: [],
+      note: "ALIBABA_SELF_ACCOUNT_ID or self_account_id is required for IM message lookup."
+    });
+  }
+
+  let limitTimeStamp = normalizeTimestamp(input.limit_time_stamp || input.limitTimeStamp || Date.now());
+  const allMessages = [];
+  const pages = [];
+  let hasMore = false;
+  let nextTimeStamp = "";
+
+  for (let page = 1; page <= maxPages; page += 1) {
+    const pageResult = await getImMessagesPage({
+      conversationId,
+      selfAccountId,
+      count,
+      forward,
+      limitTimeStamp,
+      includeSession,
+      signMethod: input.sign_method || input.signMethod || config.alibabaTopSignMethod,
+      includeRaw: input.include_raw || input.includeRaw
+    });
+
+    allMessages.push(...pageResult.messages);
+    pages.push({
+      page,
+      count: pageResult.messages.length,
+      has_more: pageResult.has_more,
+      next_time_stamp: pageResult.next_time_stamp
+    });
+
+    hasMore = pageResult.has_more;
+    nextTimeStamp = pageResult.next_time_stamp || "";
+
+    if (!hasMore || !nextTimeStamp || String(nextTimeStamp) === String(limitTimeStamp)) break;
+    limitTimeStamp = nextTimeStamp;
+  }
+
+  return buildConversationHistoryResult({
+    source: config.alibabaImMessageListMethod,
+    conversationId,
+    request: {
+      conversation_id: conversationId,
+      self_account_id: selfAccountId,
+      count,
+      max_pages: maxPages,
+      forward,
+      initial_limit_time_stamp: normalizeTimestamp(input.limit_time_stamp || input.limitTimeStamp || Date.now()),
+      include_session: includeSession
+    },
+    messages: sortMessagesByTime(dedupeMessages(allMessages)),
+    hasMore,
+    nextTimeStamp,
+    pages
+  });
+}
+
+async function getImMessagesPage(input = {}) {
+  const paramsDto = removeUndefined({
     conversation_id: input.conversationId,
-    count: clamp(Number(input.count || 50), 1, 100),
-    forward: input.forward === undefined ? false : Boolean(input.forward),
-    limit_time_stamp: input.limitTimeStamp || undefined,
-    self_account_id: input.selfAccountId || config.alibabaSelfAccountId
-  }, { includeSession: Boolean(tokenState.accessToken || tokenState.refreshToken) });
+    count: input.count,
+    forward: input.forward,
+    limit_time_stamp: input.limitTimeStamp,
+    self_account_id: input.selfAccountId
+  });
 
-  return normalizeMessages(findDeepArray(response, "message_list") || findDeepArray(response, "messages"));
+  const response = await callAlibaba(config.alibabaImMessageListMethod, {
+    params: JSON.stringify(paramsDto)
+  }, {
+    includeSession: input.includeSession,
+    signMethod: input.signMethod
+  });
+
+  return {
+    messages: normalizeMessages(findDeepArrayForKeys(response, ["message_d_t_o", "message_list", "messages"])),
+    has_more: parseBoolean(findDeepValue(response, "has_more"), false),
+    next_time_stamp: findDeepValue(response, "next_time_stamp") || "",
+    raw: input.includeRaw ? response : undefined
+  };
 }
 
 async function callOpenAiJson(messages, schemaExample) {
@@ -988,10 +1302,11 @@ async function callAlibaba(method, params = {}, options = {}) {
   }
 
   const sessionToken = options.includeSession === false ? undefined : await getAlibabaAccessToken();
+  const signMethod = options.signMethod || config.alibabaTopSignMethod || "md5";
   const allParams = removeUndefined({
     method,
     app_key: config.alibabaAppKey,
-    sign_method: "md5",
+    sign_method: signMethod,
     timestamp: formatGmt8(new Date()),
     format: "json",
     v: "2.0",
@@ -1000,7 +1315,7 @@ async function callAlibaba(method, params = {}, options = {}) {
     ...params
   });
 
-  allParams.sign = signTopParams(allParams, config.alibabaAppSecret);
+  allParams.sign = signTopParams(allParams, config.alibabaAppSecret, signMethod);
 
   const response = await fetch(config.alibabaGateway, {
     method: "POST",
@@ -1059,12 +1374,21 @@ async function callAlibabaRest(apiPath, params = {}) {
   return body;
 }
 
-function signTopParams(params, secret) {
+function signTopParams(params, secret, signMethod = "md5") {
   const base = secret + Object.keys(params)
     .filter((key) => key !== "sign" && params[key] !== undefined && params[key] !== null)
     .sort()
     .map((key) => `${key}${String(params[key])}`)
     .join("") + secret;
+
+  if (String(signMethod).toLowerCase() === "hmac") {
+    const hmacBase = Object.keys(params)
+      .filter((key) => key !== "sign" && params[key] !== undefined && params[key] !== null)
+      .sort()
+      .map((key) => `${key}${String(params[key])}`)
+      .join("");
+    return crypto.createHmac("md5", secret).update(hmacBase, "utf8").digest("hex").toUpperCase();
+  }
 
   return crypto.createHash("md5").update(base, "utf8").digest("hex").toUpperCase();
 }
@@ -1225,6 +1549,59 @@ function buildOpenApiSpec(baseUrl = config.baseUrl) {
           },
           responses: {
             "200": { description: "Structured buyer summary" }
+          }
+        }
+      },
+      "/api/buyer/conversations": {
+        post: {
+          operationId: "listAlibabaImConversations",
+          summary: "List Alibaba IM conversations for the configured seller account",
+          requestBody: {
+            required: false,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    seller_account_id: { type: "string" },
+                    count: { type: "number" },
+                    limit_time_stamp: { type: "number" },
+                    include_session: { type: "boolean" }
+                  }
+                }
+              }
+            }
+          },
+          responses: {
+            "200": { description: "Alibaba IM conversation list" }
+          }
+        }
+      },
+      "/api/buyer/history": {
+        post: {
+          operationId: "fetchAlibabaConversationHistory",
+          summary: "Fetch Alibaba IM messages by conversation id",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    conversation_id: { type: "string" },
+                    self_account_id: { type: "string" },
+                    count: { type: "number" },
+                    max_pages: { type: "number" },
+                    forward: { type: "boolean" },
+                    limit_time_stamp: { type: "number" },
+                    include_session: { type: "boolean" }
+                  }
+                }
+              }
+            }
+          },
+          responses: {
+            "200": { description: "Alibaba IM message history" }
           }
         }
       },
@@ -1566,16 +1943,105 @@ function normalizeProducts(products = []) {
   }).filter((product) => product.title || product.id || product.url);
 }
 
+function normalizeConversations(conversations = []) {
+  return conversations.map((conversation) => {
+    const latest = conversation.latest_message_time || conversation.latestMessageTime || conversation.gmt_modified || "";
+    return removeUndefined({
+      conversation_id: String(conversation.conversation_id || conversation.conversationId || conversation.id || ""),
+      latest_message_time: latest,
+      latest_message_time_text: formatMaybeTimestamp(latest),
+      buyer_account_id: conversation.buyer_account_id || conversation.buyerAccountId || conversation.receiver_account_id || "",
+      seller_account_id: conversation.seller_account_id || conversation.sellerAccountId || conversation.sender_account_id || "",
+      raw: conversation
+    });
+  }).filter((conversation) => conversation.conversation_id);
+}
+
 function normalizeMessages(messages = []) {
   return messages.map((message) => ({
+    message_id: String(message.message_id || message.messageId || message.id || ""),
+    conversation_id: String(message.conversation_id || message.conversationId || ""),
+    message_type: message.message_type || message.messageType || "",
     sender: message.sender || message.sender_account_id || message.senderAccountId || "unknown",
-    text: message.text || message.content || message.message || "",
-    time: message.time || message.send_time || message.sendTime || ""
+    sender_account_id: String(message.sender_account_id || message.senderAccountId || message.sender || ""),
+    receiver_account_id: String(message.receiver_account_id || message.receiverAccountId || message.receiver || ""),
+    text: extractMessageText(message),
+    content: message.content || message.text || message.message || "",
+    send_time: message.send_time || message.sendTime || message.time || "",
+    send_time_text: formatMaybeTimestamp(message.send_time || message.sendTime || message.time || ""),
+    time: message.time || formatMaybeTimestamp(message.send_time || message.sendTime || "")
   })).filter((message) => message.text);
 }
 
 function formatMessage(message) {
-  return `[${message.time || "no time"}] ${message.sender || "unknown"}: ${message.text}`;
+  return `[${message.time || message.send_time_text || "no time"}] ${message.sender || message.sender_account_id || "unknown"}: ${message.text}`;
+}
+
+function extractMessageText(message = {}) {
+  const direct = message.text || message.message || message.content_text || message.contentText;
+  if (direct) return String(direct);
+
+  const content = message.content;
+  if (!content) return "";
+  if (typeof content !== "string") return JSON.stringify(content);
+
+  const trimmed = content.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return trimmed;
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    const candidate = parsed.text || parsed.message || parsed.content || parsed.params || trimmed;
+    return typeof candidate === "string" ? candidate : JSON.stringify(candidate);
+  } catch {
+    return trimmed;
+  }
+}
+
+function buildConversationHistoryResult(input = {}) {
+  const messages = Array.isArray(input.messages) ? input.messages : [];
+  return removeUndefined({
+    ok: true,
+    source: input.source,
+    conversation_id: input.conversationId,
+    request: removeUndefined(input.request || {}),
+    messages,
+    message_count: messages.length,
+    has_more: Boolean(input.hasMore),
+    next_time_stamp: input.nextTimeStamp || "",
+    pages: input.pages,
+    note: input.note
+  });
+}
+
+function dedupeMessages(messages = []) {
+  const seen = new Set();
+  return messages.filter((message) => {
+    const key = message.message_id || `${message.send_time}:${message.sender_account_id}:${message.text}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function sortMessagesByTime(messages = []) {
+  return messages.slice().sort((a, b) => Number(a.send_time || 0) - Number(b.send_time || 0));
+}
+
+function normalizeTimestamp(value) {
+  if (value === undefined || value === null || value === "") return Date.now();
+  const number = Number(value);
+  if (Number.isFinite(number)) return number;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? Date.now() : date.getTime();
+}
+
+function formatMaybeTimestamp(value) {
+  if (value === undefined || value === null || value === "") return "";
+  const number = Number(value);
+  if (Number.isFinite(number) && number > 100000000000) {
+    return new Date(number).toISOString();
+  }
+  return String(value);
 }
 
 function findDeepArray(value, targetKey) {
@@ -1584,6 +2050,27 @@ function findDeepArray(value, targetKey) {
   if (Array.isArray(value[targetKey])) return value[targetKey];
   for (const child of Object.values(value)) {
     const result = findDeepArray(child, targetKey);
+    if (result.length) return result;
+  }
+  return [];
+}
+
+function findDeepArrayForKeys(value, targetKeys = []) {
+  for (const key of targetKeys) {
+    const found = findDeepArrayExact(value, key);
+    if (found.length) return found;
+  }
+  return [];
+}
+
+function findDeepArrayExact(value, targetKey) {
+  if (!value || typeof value !== "object") return [];
+  if (!Array.isArray(value) && Array.isArray(value[targetKey])) return value[targetKey];
+  if (!Array.isArray(value) && value[targetKey] && typeof value[targetKey] === "object") {
+    return Object.values(value[targetKey]).find(Array.isArray) || [];
+  }
+  for (const child of Object.values(value)) {
+    const result = findDeepArrayExact(child, targetKey);
     if (result.length) return result;
   }
   return [];
@@ -1611,6 +2098,15 @@ function isAlibabaConfigured() {
 
 function canRefreshAlibabaToken() {
   return Boolean(config.alibabaAppKey && config.alibabaAppSecret && tokenState.refreshToken);
+}
+
+function parseBoolean(value, fallback = false) {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  const text = String(value).trim().toLowerCase();
+  if (["true", "1", "yes", "y"].includes(text)) return true;
+  if (["false", "0", "no", "n"].includes(text)) return false;
+  return fallback;
 }
 
 function isTokenExpiringSoon(expiresAt) {

@@ -32,6 +32,9 @@ ALIBABA_REFRESH_TOKEN_EXPIRES_AT=...
 ALIBABA_GATEWAY=https://eco.taobao.com/router/rest
 ALIBABA_REST_GATEWAY=https://openapi-api.alibaba.com/rest
 ALIBABA_SELF_ACCOUNT_ID=...
+ALIBABA_TOP_SIGN_METHOD=hmac
+ALIBABA_IM_CONVERSATION_LIST_METHOD=alibaba.interaction.im.conversation.list.query
+ALIBABA_IM_MESSAGE_LIST_METHOD=alibaba.interaction.im.message.list.query
 ```
 
 `ALIBABA_ACCESS_TOKEN_EXPIRES_AT`과 `ALIBABA_REFRESH_TOKEN_EXPIRES_AT`은 선택값입니다. ISO 날짜 문자열이나 Unix timestamp를 넣을 수 있습니다. 값이 없더라도 상품 검색 중 토큰 만료 오류가 발생하면 서버가 `ALIBABA_REFRESH_TOKEN`으로 한 번 자동 갱신 후 재시도합니다.
@@ -133,8 +136,8 @@ ChatGPT Settings
    - 추천 상품, 추천 이유, 다음 확인 질문, 바이어용 답변, 한국어 번역을 한 번에 반환합니다.
 2. 완료: 상품 검색 결과 표시 개선
    - 상품명, 상태, 이미지, URL, 상품 ID를 표/카드/복사용 URL 목록 형태로 제공합니다.
-3. Alibaba IM 대화 히스토리 API 검증
-   - `conversation_id` 기반으로 오래된 대화까지 읽어오는 흐름을 테스트합니다.
+3. 진행: Alibaba IM 대화 히스토리 API 검증
+   - `list_alibaba_im_conversations`로 `conversation_id`를 찾고, `fetch_alibaba_conversation_history`로 오래된 메시지까지 timestamp 기반으로 조회합니다.
 4. 토큰/보안 운영 고도화
    - secret 교체, refresh token 만료 알림, 안전한 저장소 도입을 검토합니다.
 5. ChatGPT 앱 UI 컴포넌트 추가
@@ -145,6 +148,7 @@ ChatGPT Settings
 - Alibaba `app_secret`, `access_token`은 브라우저 확장 프로그램이나 ChatGPT 프롬프트에 넣지 말고 서버 환경 변수에만 보관해야 합니다.
 - `ALIBABA_REFRESH_TOKEN`을 설정하면 access token 만료 시 서버 메모리에서 자동 갱신합니다. Render가 재시작되면 환경변수에 저장된 refresh token으로 다시 갱신합니다.
 - 상품 조회는 권한 승인된 REST API `/alibaba/icbu/product/list`를 `ALIBABA_REST_GATEWAY`로 호출합니다. `ALIBABA_GATEWAY`는 일부 기존 TOP 방식 API가 필요할 때 사용합니다.
+- Alibaba IM 조회는 TOP API 문서 기준 `params` JSON 파라미터와 `hmac` 서명을 사용합니다. 이 API는 문서상 사용자 authorization이 필수가 아니므로 기본값은 `include_session=false`입니다.
 - 상품 수정, 주문 수정, 배송 처리 같은 쓰기 작업은 사용자 확인 단계를 둔 뒤 추가하는 것이 안전합니다.
 - 현재 MVP는 읽기/추천 중심입니다.
 
@@ -156,4 +160,12 @@ ChatGPT Settings
 
 ```text
 이 바이어 대화를 바탕으로 적합한 상품 5개를 추천하고, 바이어에게 보낼 영어 답변과 한국어 번역을 같이 작성해줘.
+```
+
+```text
+알리바바 IM 대화 목록을 10개 조회해서 conversation_id와 최근 메시지 시간을 표로 보여줘.
+```
+
+```text
+conversation_id가 [여기에 입력]인 알리바바 대화 히스토리를 2페이지까지 조회하고 전체 흐름을 한국어로 요약해줘.
 ```
