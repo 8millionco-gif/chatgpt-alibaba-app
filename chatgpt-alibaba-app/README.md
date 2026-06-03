@@ -27,10 +27,14 @@ ALIBABA_APP_KEY=...
 ALIBABA_APP_SECRET=...
 ALIBABA_ACCESS_TOKEN=...
 ALIBABA_REFRESH_TOKEN=...
+ALIBABA_ACCESS_TOKEN_EXPIRES_AT=...
+ALIBABA_REFRESH_TOKEN_EXPIRES_AT=...
 ALIBABA_GATEWAY=https://eco.taobao.com/router/rest
 ALIBABA_REST_GATEWAY=https://openapi-api.alibaba.com/rest
 ALIBABA_SELF_ACCOUNT_ID=...
 ```
+
+`ALIBABA_ACCESS_TOKEN_EXPIRES_AT`과 `ALIBABA_REFRESH_TOKEN_EXPIRES_AT`은 선택값입니다. ISO 날짜 문자열이나 Unix timestamp를 넣을 수 있습니다. 값이 없더라도 상품 검색 중 토큰 만료 오류가 발생하면 서버가 `ALIBABA_REFRESH_TOKEN`으로 한 번 자동 갱신 후 재시도합니다.
 
 실행:
 
@@ -105,6 +109,7 @@ ChatGPT Settings
 
 - `GET /api/alibaba/status`
 - `POST /mcp`
+- `POST /api/alibaba/oauth/refresh`
 - `POST /api/products/search`
 - `POST /api/buyer/summary`
 - `POST /api/buyer/recommend-products`
@@ -124,6 +129,7 @@ ChatGPT Settings
 ## 주의
 
 - Alibaba `app_secret`, `access_token`은 브라우저 확장 프로그램이나 ChatGPT 프롬프트에 넣지 말고 서버 환경 변수에만 보관해야 합니다.
+- `ALIBABA_REFRESH_TOKEN`을 설정하면 access token 만료 시 서버 메모리에서 자동 갱신합니다. Render가 재시작되면 환경변수에 저장된 refresh token으로 다시 갱신합니다.
 - 상품 조회는 권한 승인된 REST API `/alibaba/icbu/product/list`를 `ALIBABA_REST_GATEWAY`로 호출합니다. `ALIBABA_GATEWAY`는 일부 기존 TOP 방식 API가 필요할 때 사용합니다.
 - 상품 수정, 주문 수정, 배송 처리 같은 쓰기 작업은 사용자 확인 단계를 둔 뒤 추가하는 것이 안전합니다.
 - 현재 MVP는 읽기/추천 중심입니다.

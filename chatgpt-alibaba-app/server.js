@@ -24,6 +24,15 @@ const config = {
 };
 
 const MCP_PROTOCOL_VERSION = "2025-06-18";
+const TOKEN_REFRESH_SAFETY_MS = 5 * 60 * 1000;
+
+const tokenState = {
+  accessToken: config.alibabaAccessToken,
+  refreshToken: config.alibabaRefreshToken,
+  accessTokenExpiresAt: parseDateMs(process.env.ALIBABA_ACCESS_TOKEN_EXPIRES_AT),
+  refreshTokenExpiresAt: parseDateMs(process.env.ALIBABA_REFRESH_TOKEN_EXPIRES_AT),
+  lastRefreshAt: 0
+};
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -63,8 +72,12 @@ const server = http.createServer(async (req, res) => {
         configured: isAlibabaConfigured(),
         hasAppKey: Boolean(config.alibabaAppKey),
         hasAppSecret: Boolean(config.alibabaAppSecret),
-        hasAccessToken: Boolean(config.alibabaAccessToken),
-        hasRefreshToken: Boolean(config.alibabaRefreshToken),
+        hasAccessToken: Boolean(tokenState.accessToken),
+        hasRefreshToken: Boolean(tokenState.refreshToken),
+        accessTokenExpiresAt: toIsoOrNull(tokenState.accessTokenExpiresAt),
+        refreshTokenExpiresAt: toIsoOrNull(tokenState.refreshTokenExpiresAt),
+        lastRefreshAt: toIsoOrNull(tokenState.lastRefreshAt),
+        canAutoRefresh: canRefreshAlibabaToken(),
         hasSelfAccountId: Boolean(config.alibabaSelfAccountId),
         gateway: config.alibabaGateway
       });
@@ -73,6 +86,15 @@ const server = http.createServer(async (req, res) => {
     if (routeKey === "POST /api/alibaba/oauth/token") {
       const input = await readJson(req);
       const result = await exchangeAlibabaCode(input);
+      return sendJson(res, 200, result);
+    }
+
+    if (routeKey === "POST /api/alibaba/oauth/refresh") {
+      const input = await readJson(req);
+      const result = await refreshAlibabaAccessToken({
+        force: input.force !== false,
+        refreshToken: input.refresh_token || input.refreshToken || undefined
+      });
       return sendJson(res, 200, result);
     }
 
@@ -377,8 +399,12 @@ async function callMcpTool(params = {}) {
         configured: isAlibabaConfigured(),
         hasAppKey: Boolean(config.alibabaAppKey),
         hasAppSecret: Boolean(config.alibabaAppSecret),
-        hasAccessToken: Boolean(config.alibabaAccessToken),
-        hasRefreshToken: Boolean(config.alibabaRefreshToken),
+        hasAccessToken: Boolean(tokenState.accessToken),
+        hasRefreshToken: Boolean(tokenState.refreshToken),
+        accessTokenExpiresAt: toIsoOrNull(tokenState.accessTokenExpiresAt),
+        refreshTokenExpiresAt: toIsoOrNull(tokenState.refreshTokenExpiresAt),
+        lastRefreshAt: toIsoOrNull(tokenState.lastRefreshAt),
+        canAutoRefresh: canRefreshAlibabaToken(),
         hasSelfAccountId: Boolean(config.alibabaSelfAccountId),
         gateway: config.alibabaGateway,
         restGateway: config.alibabaRestGateway,
@@ -478,12 +504,11 @@ async function searchProducts(input = {}) {
       ok: true,
       source: "not_configured",
       products: [],
-      note: "Alibaba credentials are not configured. Add ALIBABA_APP_KEY, ALIBABA_APP_SECRET, and ALIBABA_ACCESS_TOKEN."
+      note: "Alibaba credentials are not configured. Add ALIBABA_APP_KEY, ALIBABA_APP_SECRET, and ALIBABA_ACCESS_TOKEN or ALIBABA_REFRESH_TOKEN."
     };
   }
 
-  const response = await callAlibabaRest("/alibaba/icbu/product/list", {
-    access_token: config.alibabaAccessToken,
+  const params = {
     subject,
     current_page: currentPage,
     page_size: pageSize,
@@ -494,7 +519,9 @@ async function searchProducts(input = {}) {
     gmt_modified_from: input.gmt_modified_from || input.gmtModifiedFrom || undefined,
     gmt_modified_to: input.gmt_modified_to || input.gmtModifiedTo || undefined,
     id: input.id || input.product_id || input.productId || undefined
-  });
+  };
+
+  const response = await callAlibabaRestWithAccessToken("/alibaba/icbu/product/list", params);
 
   const products = normalizeProducts(findDeepArray(response, "products"));
   return {
@@ -524,7 +551,13 @@ async function exchangeAlibabaCode(input = {}) {
   const refreshToken = findDeepValue(response, "refresh_token");
   const userId = findDeepValue(response, "user_id");
   const userNick = findDeepValue(response, "user_nick");
+  const expiresIn = findDeepValue(response, "expires_in");
+  const refreshExpiresIn = findDeepValue(response, "refresh_expires_in");
   const expireTime = findDeepValue(response, "expire_time");
+
+  if (token) {
+    updateAlibabaTokenState(response);
+  }
 
   return {
     ok: true,
@@ -533,11 +566,113 @@ async function exchangeAlibabaCode(input = {}) {
     refresh_token: refreshToken,
     user_id: userId,
     user_nick: userNick,
+    expires_in: expiresIn,
+    refresh_expires_in: refreshExpiresIn,
+    access_token_expires_at: toIsoOrNull(tokenState.accessTokenExpiresAt),
+    refresh_token_expires_at: toIsoOrNull(tokenState.refreshTokenExpiresAt),
     expire_time: expireTime,
     raw: response,
     next_step: token
-      ? "Add access_token to Render as ALIBABA_ACCESS_TOKEN. Use user_id or user_nick to help identify the seller account."
+      ? "Add access_token and refresh_token to Render. The server can automatically refresh the access token when ALIBABA_REFRESH_TOKEN is configured."
       : "Token fields were not found in the response. Check raw response."
+  };
+}
+
+async function refreshAlibabaAccessToken(options = {}) {
+  const refreshToken = options.refreshToken || tokenState.refreshToken;
+  if (!refreshToken) {
+    const error = new Error("Alibaba refresh token is not configured.");
+    error.statusCode = 503;
+    error.code = "ALIBABA_REFRESH_TOKEN_MISSING";
+    throw error;
+  }
+
+  if (!options.force && tokenState.accessToken && !isTokenExpiringSoon(tokenState.accessTokenExpiresAt)) {
+    return safeAlibabaTokenStatus(false);
+  }
+
+  const response = await callAlibabaRest("/auth/token/refresh", {
+    refresh_token: refreshToken
+  });
+
+  updateAlibabaTokenState(response, refreshToken);
+  return safeAlibabaTokenStatus(true);
+}
+
+async function getAlibabaAccessToken() {
+  if (tokenState.accessToken && !isTokenExpiringSoon(tokenState.accessTokenExpiresAt)) {
+    return tokenState.accessToken;
+  }
+
+  if (tokenState.refreshToken) {
+    await refreshAlibabaAccessToken({ force: !tokenState.accessToken || isTokenExpiringSoon(tokenState.accessTokenExpiresAt) });
+  }
+
+  return tokenState.accessToken;
+}
+
+async function callAlibabaRestWithAccessToken(apiPath, params = {}) {
+  const token = await getAlibabaAccessToken();
+  if (!token) {
+    const error = new Error("Alibaba access token is not configured.");
+    error.statusCode = 503;
+    error.code = "ALIBABA_ACCESS_TOKEN_MISSING";
+    throw error;
+  }
+
+  try {
+    return await callAlibabaRest(apiPath, {
+      ...params,
+      access_token: token
+    });
+  } catch (error) {
+    if (!canRefreshAlibabaToken() || !isAlibabaTokenError(error)) {
+      throw error;
+    }
+
+    await refreshAlibabaAccessToken({ force: true });
+    return callAlibabaRest(apiPath, {
+      ...params,
+      access_token: tokenState.accessToken
+    });
+  }
+}
+
+function updateAlibabaTokenState(response, fallbackRefreshToken = tokenState.refreshToken) {
+  const token = findDeepValue(response, "access_token");
+  const refreshToken = findDeepValue(response, "refresh_token") || fallbackRefreshToken;
+  const expiresIn = Number(findDeepValue(response, "expires_in") || 0);
+  const refreshExpiresIn = Number(findDeepValue(response, "refresh_expires_in") || 0);
+
+  if (token) {
+    tokenState.accessToken = token;
+    config.alibabaAccessToken = token;
+  }
+  if (refreshToken) {
+    tokenState.refreshToken = refreshToken;
+    config.alibabaRefreshToken = refreshToken;
+  }
+  if (expiresIn > 0) {
+    tokenState.accessTokenExpiresAt = Date.now() + expiresIn * 1000;
+  }
+  if (refreshExpiresIn > 0) {
+    tokenState.refreshTokenExpiresAt = Date.now() + refreshExpiresIn * 1000;
+  }
+  tokenState.lastRefreshAt = Date.now();
+}
+
+function safeAlibabaTokenStatus(refreshed) {
+  return {
+    ok: true,
+    refreshed,
+    hasAccessToken: Boolean(tokenState.accessToken),
+    hasRefreshToken: Boolean(tokenState.refreshToken),
+    accessTokenExpiresAt: toIsoOrNull(tokenState.accessTokenExpiresAt),
+    refreshTokenExpiresAt: toIsoOrNull(tokenState.refreshTokenExpiresAt),
+    lastRefreshAt: toIsoOrNull(tokenState.lastRefreshAt),
+    note: refreshed
+      ? "Alibaba access token was refreshed in server memory. Update Render environment variables with the newest tokens if you need persistence across restarts."
+      : "Alibaba access token is still valid or no refresh was needed."
   };
 }
 
@@ -727,7 +862,7 @@ async function getImMessages(input = {}) {
     forward: input.forward === undefined ? false : Boolean(input.forward),
     limit_time_stamp: input.limitTimeStamp || undefined,
     self_account_id: input.selfAccountId || config.alibabaSelfAccountId
-  }, { includeSession: Boolean(config.alibabaAccessToken) });
+  }, { includeSession: Boolean(tokenState.accessToken || tokenState.refreshToken) });
 
   return normalizeMessages(findDeepArray(response, "message_list") || findDeepArray(response, "messages"));
 }
@@ -779,6 +914,7 @@ async function callAlibaba(method, params = {}, options = {}) {
     throw error;
   }
 
+  const sessionToken = options.includeSession === false ? undefined : await getAlibabaAccessToken();
   const allParams = removeUndefined({
     method,
     app_key: config.alibabaAppKey,
@@ -787,7 +923,7 @@ async function callAlibaba(method, params = {}, options = {}) {
     format: "json",
     v: "2.0",
     simplify: "true",
-    session: options.includeSession === false ? undefined : config.alibabaAccessToken || undefined,
+    session: sessionToken || undefined,
     ...params
   });
 
@@ -931,6 +1067,31 @@ function buildOpenApiSpec(baseUrl = config.baseUrl) {
           },
           responses: {
             "200": { description: "Alibaba access token response" }
+          }
+        }
+      },
+      "/api/alibaba/oauth/refresh": {
+        post: {
+          operationId: "refreshAlibabaAccessToken",
+          summary: "Refresh the Alibaba access token in server memory using the configured refresh token",
+          requestBody: {
+            required: false,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    force: {
+                      type: "boolean",
+                      description: "When true, refresh even if the current token is not known to be expiring."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          responses: {
+            "200": { description: "Safe token refresh status without raw token values" }
           }
         }
       },
@@ -1201,7 +1362,50 @@ function formatGmt8(date) {
 }
 
 function isAlibabaConfigured() {
-  return Boolean(config.alibabaAppKey && config.alibabaAppSecret && config.alibabaAccessToken);
+  return Boolean(config.alibabaAppKey && config.alibabaAppSecret && (tokenState.accessToken || tokenState.refreshToken));
+}
+
+function canRefreshAlibabaToken() {
+  return Boolean(config.alibabaAppKey && config.alibabaAppSecret && tokenState.refreshToken);
+}
+
+function isTokenExpiringSoon(expiresAt) {
+  if (!expiresAt) return false;
+  return Date.now() + TOKEN_REFRESH_SAFETY_MS >= expiresAt;
+}
+
+function isAlibabaTokenError(error) {
+  const details = error?.details || {};
+  const haystack = [
+    error?.code,
+    error?.message,
+    details.code,
+    details.message,
+    details.msg,
+    details.error_msg
+  ].filter(Boolean).join(" ").toLowerCase();
+
+  return haystack.includes("token")
+    || haystack.includes("session")
+    || haystack.includes("expired")
+    || haystack.includes("invalid authorization")
+    || haystack.includes("access_token");
+}
+
+function parseDateMs(value) {
+  if (!value) return 0;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    return numeric < 10_000_000_000 ? numeric * 1000 : numeric;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function toIsoOrNull(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
 function assertAuthorized(req) {
