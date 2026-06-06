@@ -2837,9 +2837,13 @@ function normalizeFinalListingFields(fields = {}) {
 
 function normalizeAlibabaListingPayload(payload = {}) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return {};
-  return removeUndefined(Object.fromEntries(Object.entries(payload)
+  const clean = removeUndefined(Object.fromEntries(Object.entries(payload)
     .filter(([key]) => !String(key).startsWith("_"))
     .map(([key, value]) => [key, value])));
+  if (looksLikeStructuredDraftPayload(clean)) {
+    return buildListingPayloadFromStructuredDraft(clean);
+  }
+  return clean;
 }
 
 function buildAlibabaListingPayloadCandidate(cloneDraft = {}, sourceProduct = {}, finalFields = {}) {
@@ -2885,6 +2889,104 @@ function buildAlibabaListingPayloadCandidate(cloneDraft = {}, sourceProduct = {}
   };
 }
 
+function looksLikeStructuredDraftPayload(payload = {}) {
+  return Boolean(
+    payload.basic_info ||
+    payload.seo ||
+    payload.product_attributes ||
+    payload.trade_info ||
+    payload.description ||
+    payload.images ||
+    payload.action === "create_product_draft"
+  );
+}
+
+function buildListingPayloadFromStructuredDraft(draft = {}) {
+  const basic = draft.basic_info || {};
+  const seo = draft.seo || {};
+  const attributes = draft.product_attributes || {};
+  const description = draft.description || {};
+  const imagesBlock = draft.images || {};
+  const trade = draft.trade_info || {};
+  const compliance = draft.compliance || {};
+  const sourceImages = ensureArray(imagesBlock.source_images || imagesBlock.images || imagesBlock.urls || draft.source_images);
+  const keywords = ensureUnique([
+    ...normalizeStringList(seo.main_keywords),
+    ...normalizeStringList(seo.keyword_block),
+    ...normalizeStringList(draft.keywords)
+  ]).slice(0, 30);
+
+  const product = removeUndefined({
+    subject: basic.subject || draft.title || "",
+    title: basic.subject || draft.title || "",
+    category_id: basic.category_id || draft.category_id || "",
+    group_id: basic.group_id || draft.group_id || "",
+    group_name: basic.group_name || draft.group_name || "",
+    language: draft.language || basic.language || "ENGLISH",
+    product_type: draft.product_type || draft.productType || "wholesale",
+    display: draft.display || "N",
+    brand_name: basic.brand_name || draft.brand || draft.brand_name || "",
+    origin: basic.origin || draft.origin || "",
+    supply_type: basic.supply_type,
+    keywords,
+    images: sourceImages.map(String).filter(Boolean),
+    detail_html: buildDetailHtmlFromStructuredDraft(description, draft.faq, compliance),
+    attributes: removeUndefined({
+      ...attributes,
+      brand_name: basic.brand_name || draft.brand || "",
+      origin: basic.origin || "",
+      supply_type: basic.supply_type
+    }),
+    price_range: trade.price_ranges || draft.price_ranges,
+    price: trade.price || trade.fob_price || draft.price || "",
+    moq: trade.moq || draft.moq || "",
+    sample_available: trade.sample_available,
+    sample_price: trade.sample_price,
+    currency: trade.currency,
+    lead_time: trade.lead_time || draft.lead_time || "",
+    shipping_method: trade.shipping_method || "",
+    shipping_template_id: trade.shipping_template_id || trade.shippingTemplateId || draft.shipping_template_id || "",
+    rts: trade.rts,
+    source_product_id: draft.source_product_id || "",
+    copy_from_product: draft.copy_from_product,
+    compliance_notes: compliance,
+    required_verification_fields: ensureUnique([
+      ...normalizeStringList(draft.missing_required_fields),
+      ...normalizeStringList(compliance.requires_verification)
+    ])
+  });
+
+  return {
+    product,
+    _source_payload_format: "structured_draft",
+    _client_note: "Structured draft payload was converted to a product object. Review exact Alibaba listing/v2 field names in API Explorer before publish."
+  };
+}
+
+function buildDetailHtmlFromStructuredDraft(description = {}, faq = [], compliance = {}) {
+  const blocks = [];
+  if (description.short_description) {
+    blocks.push(`<p>${escapeHtml(description.short_description)}</p>`);
+  }
+  if (description.detail_description) {
+    for (const paragraph of String(description.detail_description).split(/\n{2,}/).map((item) => item.trim()).filter(Boolean)) {
+      blocks.push(`<p>${escapeHtml(paragraph)}</p>`);
+    }
+  }
+  const faqItems = ensureArray(faq).filter((item) => item && typeof item === "object");
+  if (faqItems.length) {
+    blocks.push("<h3>FAQ</h3>");
+    for (const item of faqItems) {
+      blocks.push(`<h4>${escapeHtml(item.question || "")}</h4><p>${escapeHtml(item.answer || "")}</p>`);
+    }
+  }
+  const safeClaims = normalizeStringList(compliance.safe_claims);
+  if (safeClaims.length) {
+    blocks.push(`<h3>Safe Positioning Keywords</h3><ul>${safeClaims.map((claim) => `<li>${escapeHtml(claim)}</li>`).join("")}</ul>`);
+  }
+  return blocks.join("\n");
+}
+
 function stripInternalListingPayload(payload = {}) {
   const clean = normalizeAlibabaListingPayload(payload);
   if (clean.product && typeof clean.product === "object" && !Array.isArray(clean.product)) {
@@ -2908,6 +3010,20 @@ function validateListingPayloadReadiness(listingPayload = {}, cloneDraft = {}, f
   if (!hasFinalValue(product.price || product.price_range || product.fob_price)) missing.push("가격/price");
   if (!hasFinalValue(product.moq || product.min_order_quantity || product.minOrderQuantity)) missing.push("MOQ");
   if (!hasFinalValue(product.shipping_template_id || product.shippingTemplateId)) missing.push("배송 템플릿/shipping_template_id");
+  if (isCosmeticListing(product)) {
+    if (!hasFinalValue(product.capacity || product.volume || product.attributes?.capacity || product.attributes?.volume)) {
+      missing.push("정확한 용량/capacity");
+    }
+    if (!hasFinalValue(product.full_inci || product.inci || product.attributes?.full_inci || product.attributes?.inci || product.attributes?.full_inci_list)) {
+      missing.push("전체 INCI/full_inci");
+    }
+    if (!hasFinalValue(product.shelf_life || product.expiration || product.attributes?.shelf_life || product.attributes?.expiration)) {
+      missing.push("유통기한/shelf_life");
+    }
+    if (!hasFinalValue(product.lead_time || product.leadTime)) {
+      missing.push("리드타임/lead_time");
+    }
+  }
 
   if (duplicateRisk.level === "high" && finalFields.duplicate_risk_acknowledged !== true) {
     warnings.push("중복 위험이 high입니다. 이미지/구성/타깃/제목 차별화 확인이 필요합니다.");
@@ -2917,6 +3033,9 @@ function validateListingPayloadReadiness(listingPayload = {}, cloneDraft = {}, f
   }
   if (product._client_note || listingPayload._client_note) {
     warnings.push("현재 payload는 후보 구조입니다. API Explorer에서 요구하는 정확한 listing/v2 파라미터명으로 매핑해야 할 수 있습니다.");
+  }
+  if (hasNonEmptyCollection(product.required_verification_fields)) {
+    warnings.push(`확인 필요 항목: ${ensureArray(product.required_verification_fields).slice(0, 12).join(", ")}`);
   }
 
   return {
@@ -2988,6 +3107,20 @@ function hasFinalValue(value) {
 function hasFinalObject(value) {
   if (!hasNonEmptyObject(value)) return false;
   return Object.values(value).some((item) => hasFinalValue(item));
+}
+
+function isCosmeticListing(product = {}) {
+  const haystack = [
+    product.subject,
+    product.title,
+    product.category_name,
+    product.categoryName,
+    product.attributes?.product_category,
+    product.attributes?.form,
+    product.attributes?.function,
+    product.keywords
+  ].flat(Infinity).join(" ").toLowerCase();
+  return /cosmetic|skincare|skin care|cream|serum|ampoule|toner|cleanser|eye|blemish|wrinkle|moistur|brighten|whitening|k[-\s]?beauty|화장품/.test(haystack);
 }
 
 function normalizeDetailSection(section) {
