@@ -6,6 +6,9 @@ ChatGPT에 연결할 수 있는 Alibaba 계정 운영 비서 백엔드 MVP입니
 
 - Alibaba API 연결 상태 확인
 - 내 상품 검색
+- 기존 상품 복사 기반 신규 등록 초안 생성
+- 신규 등록 전 중복 리스팅 위험 점검
+- 사용자 승인 후 Alibaba 신규 상품 등록 실행
 - 바이어 대화 요약
 - 바이어 대화 기반 추천 상품 리스트 생성
 - 상품 URL을 포함한 바이어용 공유 메시지 생성
@@ -25,6 +28,8 @@ copy .env.example .env
 OPENAI_API_KEY=...
 ALIBABA_APP_KEY=...
 ALIBABA_APP_SECRET=...
+ALIBABA_TOP_APP_KEY=...
+ALIBABA_TOP_APP_SECRET=...
 ALIBABA_ACCESS_TOKEN=...
 ALIBABA_REFRESH_TOKEN=...
 ALIBABA_ACCESS_TOKEN_EXPIRES_AT=...
@@ -89,6 +94,7 @@ ChatGPT Settings
 ```text
 알리바바 연결 상태 확인해줘.
 화장품 관련 내 상품 5개 찾아줘.
+이 상품을 복사해서 미국 바이어용 신규 등록 초안을 만들어줘.
 이 바이어 대화를 한국어로 요약하고 다음 답변을 추천해줘.
 아래 바이어에게 추천할 상품 3개를 골라주고, 영어 답변과 한국어 번역을 같이 작성해줘.
 ```
@@ -97,7 +103,12 @@ ChatGPT Settings
 
 - `alibaba_connection_status`
 - `search_alibaba_products`
+- `draft_optimized_product_clone`
+- `prepare_product_listing_payload`
+- `publish_product_listing`
 - `summarize_buyer_conversation`
+- `list_alibaba_im_conversations`
+- `fetch_alibaba_conversation_history`
 - `recommend_products_for_buyer`
 
 ## ChatGPT Actions로 연결하는 방법
@@ -115,7 +126,12 @@ ChatGPT Settings
 - `POST /mcp`
 - `POST /api/alibaba/oauth/refresh`
 - `POST /api/products/search`
+- `POST /api/products/clone-draft`
+- `POST /api/products/listing/prepare`
+- `POST /api/products/listing/publish`
 - `POST /api/buyer/summary`
+- `POST /api/buyer/conversations`
+- `POST /api/buyer/history`
 - `POST /api/buyer/recommend-products`
 - `POST /api/orders/brief`
 
@@ -136,11 +152,17 @@ ChatGPT Settings
    - 추천 상품, 추천 이유, 다음 확인 질문, 바이어용 답변, 한국어 번역을 한 번에 반환합니다.
 2. 완료: 상품 검색 결과 표시 개선
    - 상품명, 상태, 이미지, URL, 상품 ID를 표/카드/복사용 URL 목록 형태로 제공합니다.
-3. 진행: Alibaba IM 대화 히스토리 API 검증
+3. 완료: 기존 상품 복사 기반 신규 등록 초안
+   - 원본 상품을 기준으로 제목, 키워드, 상세 구성, 중복 위험, 등록 전 확인 항목을 생성합니다.
+   - 실제 상품 등록/수정 API는 호출하지 않는 초안 전용 기능입니다.
+4. 진행: Alibaba IM 대화 히스토리 API 검증
    - `list_alibaba_im_conversations`로 `conversation_id`를 찾고, `fetch_alibaba_conversation_history`로 오래된 메시지까지 timestamp 기반으로 조회합니다.
-4. 토큰/보안 운영 고도화
+5. 완료: 상품 신규 등록 승인 흐름
+   - `prepare_product_listing_payload`로 등록 전 누락 항목과 payload를 확인합니다.
+   - `publish_product_listing`은 `execute=true`와 `confirmation_phrase=등록 실행`이 있어야만 `/alibaba/icbu/product/listing/v2`를 호출합니다.
+6. 토큰/보안 운영 고도화
    - secret 교체, refresh token 만료 알림, 안전한 저장소 도입을 검토합니다.
-5. ChatGPT 앱 UI 컴포넌트 추가
+7. ChatGPT 앱 UI 컴포넌트 추가
    - 추천 상품을 ChatGPT 안에서 카드형 UI로 보여주는 화면을 추가합니다.
 
 ## 주의
@@ -149,6 +171,9 @@ ChatGPT Settings
 - `ALIBABA_REFRESH_TOKEN`을 설정하면 access token 만료 시 서버 메모리에서 자동 갱신합니다. Render가 재시작되면 환경변수에 저장된 refresh token으로 다시 갱신합니다.
 - 상품 조회는 권한 승인된 REST API `/alibaba/icbu/product/list`를 `ALIBABA_REST_GATEWAY`로 호출합니다. `ALIBABA_GATEWAY`는 일부 기존 TOP 방식 API가 필요할 때 사용합니다.
 - Alibaba IM 조회는 TOP API 문서 기준 `params` JSON 파라미터와 `hmac` 서명을 사용합니다. 이 API는 문서상 사용자 authorization이 필수가 아니므로 기본값은 `include_session=false`입니다.
+- IM API에서 `Invalid app Key`가 나오면 현재 GGS-ISV `ALIBABA_APP_KEY`가 TOP 게이트웨이에서 유효하지 않은 상태입니다. Alibaba에서 TOP/OKKI&TM 앱 키를 별도 발급받은 뒤 `ALIBABA_TOP_APP_KEY`, `ALIBABA_TOP_APP_SECRET`에 넣어야 합니다.
+- 기존 상품 복사 기반 신규 등록 초안은 중복 리스팅 위험을 낮추기 위한 검토 도구입니다. 실제 신규 등록 전에는 이미지, 제목, 속성, 가격, MOQ, 배송 템플릿, 효능 표현을 사람이 확인해야 합니다.
+- 실제 신규 상품 등록은 명시 승인 방식입니다. `confirmation_phrase`가 정확히 `등록 실행`이고 `execute=true`일 때만 Alibaba 등록 API를 호출합니다.
 - 상품 수정, 주문 수정, 배송 처리 같은 쓰기 작업은 사용자 확인 단계를 둔 뒤 추가하는 것이 안전합니다.
 - 현재 MVP는 읽기/추천 중심입니다.
 
@@ -168,4 +193,16 @@ ChatGPT Settings
 
 ```text
 conversation_id가 [여기에 입력]인 알리바바 대화 히스토리를 2페이지까지 조회하고 전체 흐름을 한국어로 요약해줘.
+```
+
+```text
+상품 ID 10000031929376을 복사해서 미국 바이어용 private label blemish care 신규 등록 초안을 만들고, 중복 위험과 등록 전 확인 항목을 같이 보여줘.
+```
+
+```text
+방금 만든 신규 등록 초안을 기준으로 등록 payload를 준비하고 부족한 항목을 알려줘.
+```
+
+```text
+최종 등록 정보가 맞는지 확인했어. confirmation_phrase는 등록 실행이고 execute=true로 Alibaba 신규 상품 등록을 실행해줘.
 ```

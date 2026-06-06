@@ -16,6 +16,8 @@ const config = {
   openaiUrl: process.env.OPENAI_CHAT_COMPLETIONS_URL || "https://api.openai.com/v1/chat/completions",
   alibabaAppKey: process.env.ALIBABA_APP_KEY || "",
   alibabaAppSecret: process.env.ALIBABA_APP_SECRET || "",
+  alibabaTopAppKey: process.env.ALIBABA_TOP_APP_KEY || process.env.ALIBABA_APP_KEY || "",
+  alibabaTopAppSecret: process.env.ALIBABA_TOP_APP_SECRET || process.env.ALIBABA_APP_SECRET || "",
   alibabaAccessToken: process.env.ALIBABA_ACCESS_TOKEN || "",
   alibabaRefreshToken: process.env.ALIBABA_REFRESH_TOKEN || "",
   alibabaGateway: process.env.ALIBABA_GATEWAY || "https://eco.taobao.com/router/rest",
@@ -29,6 +31,8 @@ const config = {
 const MCP_PROTOCOL_VERSION = "2025-06-18";
 const APP_VERSION = "0.2.0";
 const TOKEN_REFRESH_SAFETY_MS = 5 * 60 * 1000;
+const ALIBABA_PRODUCT_LISTING_API = "/alibaba/icbu/product/listing/v2";
+const PRODUCT_PUBLISH_CONFIRMATION_PHRASE = "등록 실행";
 
 const tokenState = {
   accessToken: config.alibabaAccessToken,
@@ -76,6 +80,9 @@ const server = http.createServer(async (req, res) => {
         configured: isAlibabaConfigured(),
         hasAppKey: Boolean(config.alibabaAppKey),
         hasAppSecret: Boolean(config.alibabaAppSecret),
+        hasTopAppKey: Boolean(config.alibabaTopAppKey),
+        hasTopAppSecret: Boolean(config.alibabaTopAppSecret),
+        topAppKeyUsesRestAppKey: config.alibabaTopAppKey === config.alibabaAppKey,
         hasAccessToken: Boolean(tokenState.accessToken),
         hasRefreshToken: Boolean(tokenState.refreshToken),
         accessTokenExpiresAt: toIsoOrNull(tokenState.accessTokenExpiresAt),
@@ -106,6 +113,24 @@ const server = http.createServer(async (req, res) => {
       const input = await readJson(req);
       const products = await searchProducts(input);
       return sendJson(res, 200, products);
+    }
+
+    if (routeKey === "POST /api/products/clone-draft") {
+      const input = await readJson(req);
+      const result = await draftOptimizedProductClone(input);
+      return sendJson(res, 200, result);
+    }
+
+    if (routeKey === "POST /api/products/listing/prepare") {
+      const input = await readJson(req);
+      const result = await prepareProductListingPayload(input);
+      return sendJson(res, 200, result);
+    }
+
+    if (routeKey === "POST /api/products/listing/publish") {
+      const input = await readJson(req);
+      const result = await publishProductListing(input);
+      return sendJson(res, 200, result);
     }
 
     if (routeKey === "POST /api/buyer/summary") {
@@ -480,6 +505,126 @@ function getMcpTools() {
       }
     },
     {
+      name: "draft_optimized_product_clone",
+      title: "Draft optimized product clone",
+      description: "Fetch or accept an existing Alibaba product, then create a safe optimized draft for a new listing with duplicate-listing risk checks. This tool does not publish or update products.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          product_id: {
+            type: "string",
+            description: "Existing Alibaba product id to copy as the source product."
+          },
+          id: {
+            type: "string",
+            description: "Alias for product_id."
+          },
+          source_product: {
+            type: "object",
+            description: "Optional product object already fetched from Alibaba. When provided, the server does not call product/get."
+          },
+          target_market: {
+            type: "string",
+            description: "Target buyer market or region, for example USA, EU, GCC, Southeast Asia, or global."
+          },
+          positioning: {
+            type: "string",
+            description: "How the new listing should be different, for example OEM/ODM, private label, retail-ready set, sensitive skin, or vegan."
+          },
+          differentiation_points: {
+            type: "array",
+            items: { type: "string" },
+            description: "Concrete differences from the source product. Required before publishing a new listing safely."
+          },
+          buyer_keywords: {
+            type: "array",
+            items: { type: "string" },
+            description: "SEO or buyer-intent keywords to emphasize."
+          },
+          language: {
+            type: "string",
+            description: "Draft language. Defaults to English."
+          },
+          include_raw: {
+            type: "boolean",
+            description: "Include the raw fetched product response for debugging. Defaults to false."
+          }
+        }
+      },
+      annotations: {
+        readOnlyHint: true
+      }
+    },
+    {
+      name: "prepare_product_listing_payload",
+      title: "Prepare product listing payload",
+      description: "Convert a reviewed product clone draft into a publish-ready payload preview for Alibaba product listing. This tool does not call Alibaba publish APIs.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          clone_draft: {
+            type: "object",
+            description: "clone_draft returned by draft_optimized_product_clone."
+          },
+          source_product: {
+            type: "object",
+            description: "Source product returned by draft_optimized_product_clone."
+          },
+          listing_payload: {
+            type: "object",
+            description: "Optional exact Alibaba API payload if already mapped manually."
+          },
+          final_fields: {
+            type: "object",
+            description: "Human-reviewed final listing fields such as title, category_id, images, price, moq, shipping_template_id, attributes, details."
+          },
+          notes: {
+            type: "string",
+            description: "Review notes or constraints to include in the preparation result."
+          }
+        }
+      },
+      annotations: {
+        readOnlyHint: true
+      }
+    },
+    {
+      name: "publish_product_listing",
+      title: "Publish product listing",
+      description: "Actually call Alibaba product listing API after explicit user confirmation. Requires confirmation_phrase exactly '등록 실행' and execute=true.",
+      inputSchema: {
+        type: "object",
+        required: ["listing_payload", "confirmation_phrase", "execute"],
+        properties: {
+          listing_payload: {
+            type: "object",
+            description: "Final Alibaba listing API payload. This must already be reviewed and schema-mapped."
+          },
+          confirmation_phrase: {
+            type: "string",
+            description: "Must be exactly '등록 실행'."
+          },
+          execute: {
+            type: "boolean",
+            description: "Must be true to call Alibaba."
+          },
+          idempotency_key: {
+            type: "string",
+            description: "Optional user-provided key for audit/reference."
+          },
+          dry_run: {
+            type: "boolean",
+            description: "When true, returns the payload without calling Alibaba. Defaults to false only when execute=true and confirmation_phrase is valid."
+          }
+        }
+      },
+      annotations: {
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true
+      }
+    },
+    {
       name: "recommend_products_for_buyer",
       title: "Recommend products for buyer",
       description: "Recommend seller products for a buyer based on conversation context, then draft a buyer-facing reply with Korean translation and next follow-up questions.",
@@ -551,6 +696,9 @@ async function callMcpTool(params = {}) {
         configured: isAlibabaConfigured(),
         hasAppKey: Boolean(config.alibabaAppKey),
         hasAppSecret: Boolean(config.alibabaAppSecret),
+        hasTopAppKey: Boolean(config.alibabaTopAppKey),
+        hasTopAppSecret: Boolean(config.alibabaTopAppSecret),
+        topAppKeyUsesRestAppKey: config.alibabaTopAppKey === config.alibabaAppKey,
         hasAccessToken: Boolean(tokenState.accessToken),
         hasRefreshToken: Boolean(tokenState.refreshToken),
         accessTokenExpiresAt: toIsoOrNull(tokenState.accessTokenExpiresAt),
@@ -574,6 +722,15 @@ async function callMcpTool(params = {}) {
 
     case "fetch_alibaba_conversation_history":
       return mcpToolResult(await fetchConversationHistory(args), "Alibaba IM 대화 히스토리입니다.");
+
+    case "draft_optimized_product_clone":
+      return mcpToolResult(await draftOptimizedProductClone(args), "기존 상품 복사 기반 신규 등록 초안입니다.");
+
+    case "prepare_product_listing_payload":
+      return mcpToolResult(await prepareProductListingPayload(args), "Alibaba 신규 상품 등록 전 검토용 payload입니다.");
+
+    case "publish_product_listing":
+      return mcpToolResult(await publishProductListing(args), "Alibaba 신규 상품 등록 실행 결과입니다.");
 
     case "recommend_products_for_buyer":
       return mcpToolResult(await recommendProducts(args), "바이어에게 제안할 상품과 메시지 초안입니다.");
@@ -651,6 +808,15 @@ function summarizeForMcpText(value) {
       ...lines,
       pageNote
     ].filter(Boolean).join("\n");
+  }
+  if (value.clone_draft) {
+    return formatProductCloneDraftText(value);
+  }
+  if (value.listing_preparation) {
+    return formatListingPreparationText(value);
+  }
+  if (value.publish_result) {
+    return formatProductPublishResultText(value);
   }
   if (Array.isArray(value.products)) {
     if (!value.products.length) return "검색된 상품이 없습니다.";
@@ -774,6 +940,249 @@ async function searchProducts(input = {}) {
   });
 }
 
+async function getProductDetail(input = {}) {
+  const provided = input.source_product || input.sourceProduct || input.product;
+  if (provided && typeof provided === "object") {
+    return {
+      ok: true,
+      source: "provided",
+      product: normalizeProductDetail(provided),
+      raw: provided
+    };
+  }
+
+  const productId = String(input.product_id || input.productId || input.id || "").trim();
+  if (!productId) {
+    const error = new Error("product_id or source_product is required.");
+    error.statusCode = 400;
+    error.code = "PRODUCT_SOURCE_REQUIRED";
+    throw error;
+  }
+
+  if (!isAlibabaConfigured()) {
+    return {
+      ok: true,
+      source: "not_configured",
+      product: normalizeProductDetail({ id: productId, product_id: productId }),
+      note: "Alibaba credentials are not configured, so only a minimal draft can be created."
+    };
+  }
+
+  let response;
+  try {
+    response = await callAlibabaRestWithAccessToken("/alibaba/icbu/product/get/v2", {
+      product_id: productId
+    });
+  } catch (error) {
+    response = await callAlibabaRestWithAccessToken("/alibaba/icbu/product/get/v2", {
+      id: productId
+    });
+  }
+  const product = normalizeProductDetail(extractProductDetail(response) || { id: productId, product_id: productId });
+
+  return {
+    ok: true,
+    source: "/alibaba/icbu/product/get/v2",
+    product,
+    raw: response
+  };
+}
+
+async function draftOptimizedProductClone(input = {}) {
+  const detail = await getProductDetail(input);
+  const sourceProduct = detail.product || {};
+  const context = {
+    target_market: input.target_market || input.targetMarket || "global",
+    positioning: input.positioning || input.new_positioning || input.newPositioning || "",
+    differentiation_points: normalizeStringList(input.differentiation_points || input.differentiationPoints),
+    buyer_keywords: normalizeStringList(input.buyer_keywords || input.buyerKeywords || input.keywords),
+    language: input.language || "English"
+  };
+
+  let draft;
+  let draftSource = "fallback";
+  if (config.openaiApiKey && (sourceProduct.title || sourceProduct.subject || sourceProduct.product_id)) {
+    try {
+      draft = await buildOpenAiProductCloneDraft(sourceProduct, context);
+      draftSource = "openai";
+    } catch (error) {
+      draft = buildFallbackProductCloneDraft(sourceProduct, context);
+      draft.openai_error = removeUndefined({
+        code: error.code,
+        message: error.message
+      });
+    }
+  } else {
+    draft = buildFallbackProductCloneDraft(sourceProduct, context);
+  }
+
+  return buildProductCloneDraftResult({
+    detail,
+    sourceProduct,
+    context,
+    draft,
+    draftSource,
+    includeRaw: Boolean(input.include_raw || input.includeRaw)
+  });
+}
+
+async function buildOpenAiProductCloneDraft(sourceProduct, context) {
+  const schema = {
+    draft_status: "draft_only",
+    seo_title_candidates: ["Optimized Alibaba product title"],
+    short_description: "Buyer-facing product summary without unsupported claims.",
+    detail_sections: [
+      { heading: "Why buyers choose it", bullets: ["Specific buyer benefit"] }
+    ],
+    keywords: ["keyword"],
+    attributes_to_review: ["category attributes that must be checked manually"],
+    images_to_review: ["image changes needed before publish"],
+    duplicate_risk: {
+      level: "medium",
+      score: 60,
+      reasons: ["why this may be similar to the source listing"],
+      required_changes_before_publish: ["what must change before creating a new listing"]
+    },
+    compliance_warnings: ["claims or fields to verify"],
+    listing_payload_preview: {
+      title: "Selected optimized title",
+      category_id: "",
+      group_id: "",
+      keywords: ["keyword"],
+      requires_manual_mapping: true
+    }
+  };
+
+  return callOpenAiJson([
+    {
+      role: "system",
+      content: [
+        "You optimize Alibaba seller product listings.",
+        "Create a draft for a new listing based on an existing source product.",
+        "Do not invent prices, MOQ, certifications, medical claims, delivery promises, stock, or unsupported product facts.",
+        "Flag duplicate-listing risk clearly. The output must be draft-only and must not imply the product was published."
+      ].join(" ")
+    },
+    {
+      role: "user",
+      content: JSON.stringify({
+        task: "Create an optimized new-listing draft from the source product.",
+        source_product: sourceProduct,
+        target_market: context.target_market,
+        positioning: context.positioning,
+        differentiation_points: context.differentiation_points,
+        buyer_keywords: context.buyer_keywords,
+        language: context.language
+      }, null, 2)
+    }
+  ], schema);
+}
+
+async function prepareProductListingPayload(input = {}) {
+  const sourceProduct = input.source_product || input.sourceProduct || input.source_product_snapshot || {};
+  const cloneDraft = input.clone_draft || input.cloneDraft || input.draft?.clone_draft || {};
+  const finalFields = normalizeFinalListingFields(input.final_fields || input.finalFields || {});
+  const providedPayload = input.listing_payload || input.listingPayload || input.api_payload || input.apiPayload;
+  const listingPayload = providedPayload && typeof providedPayload === "object"
+    ? normalizeAlibabaListingPayload(providedPayload)
+    : buildAlibabaListingPayloadCandidate(cloneDraft, sourceProduct, finalFields);
+  const readiness = validateListingPayloadReadiness(listingPayload, cloneDraft, finalFields);
+
+  return removeUndefined({
+    ok: true,
+    listing_preparation: {
+      api_path: ALIBABA_PRODUCT_LISTING_API,
+      api_not_called: true,
+      ready_to_publish: readiness.ready,
+      missing_fields: readiness.missing,
+      warnings: readiness.warnings,
+      duplicate_risk: cloneDraft.duplicate_risk,
+      listing_payload: listingPayload,
+      publish_requires: {
+        execute: true,
+        confirmation_phrase: PRODUCT_PUBLISH_CONFIRMATION_PHRASE,
+        endpoint: "/api/products/listing/publish",
+        mcp_tool: "publish_product_listing"
+      },
+      human_review_checklist: buildListingHumanReviewChecklist(readiness)
+    },
+    source_product: sourceProduct,
+    note: "등록 전 검토용입니다. Alibaba 신규 등록 API는 호출하지 않았습니다.",
+    next_actions: readiness.ready
+      ? [`최종 확인 후 '${PRODUCT_PUBLISH_CONFIRMATION_PHRASE}' 문구와 execute=true로 실제 등록을 실행할 수 있습니다.`]
+      : ["missing_fields를 보완한 뒤 다시 prepare_product_listing_payload를 실행하세요."]
+  });
+}
+
+async function publishProductListing(input = {}) {
+  const listingPayload = input.listing_payload || input.listingPayload || input.api_payload || input.apiPayload;
+  const confirmationPhrase = String(input.confirmation_phrase || input.confirmationPhrase || "").trim();
+  const execute = input.execute === true;
+  const dryRun = input.dry_run === true || input.dryRun === true;
+
+  if (!listingPayload || typeof listingPayload !== "object" || Array.isArray(listingPayload)) {
+    const error = new Error("Final listing_payload object is required.");
+    error.statusCode = 400;
+    error.code = "LISTING_PAYLOAD_REQUIRED";
+    throw error;
+  }
+
+  const normalizedPayload = stripInternalListingPayload(listingPayload);
+  const readiness = validateListingPayloadReadiness(normalizedPayload, {}, {});
+
+  if (!execute || confirmationPhrase !== PRODUCT_PUBLISH_CONFIRMATION_PHRASE) {
+    return {
+      ok: false,
+      publish_result: {
+        executed: false,
+        api_not_called: true,
+        reason: "Explicit confirmation is required before creating an Alibaba product.",
+        required_execute: true,
+        required_confirmation_phrase: PRODUCT_PUBLISH_CONFIRMATION_PHRASE,
+        received_confirmation_phrase: confirmationPhrase || "",
+        readiness
+      },
+      listing_payload: normalizedPayload
+    };
+  }
+
+  if (dryRun) {
+    return {
+      ok: true,
+      publish_result: {
+        executed: false,
+        api_not_called: true,
+        dry_run: true,
+        api_path: ALIBABA_PRODUCT_LISTING_API,
+        readiness
+      },
+      listing_payload: normalizedPayload
+    };
+  }
+
+  const response = await callAlibabaRestWithAccessToken(ALIBABA_PRODUCT_LISTING_API, normalizedPayload, {
+    method: "POST"
+  });
+
+  return {
+    ok: true,
+    publish_result: {
+      executed: true,
+      api_path: ALIBABA_PRODUCT_LISTING_API,
+      idempotency_key: input.idempotency_key || input.idempotencyKey || "",
+      product_id: findDeepValue(response, "product_id") || findDeepValue(response, "productId") || findDeepValue(response, "id") || "",
+      task_id: findDeepValue(response, "task_id") || findDeepValue(response, "taskId") || "",
+      status: findDeepValue(response, "status") || findDeepValue(response, "code") || "submitted",
+      readiness,
+      raw: response
+    },
+    next_actions: [
+      "Alibaba 콘솔 또는 상품 상태 조회 API에서 등록 상태를 확인하세요.",
+      "필요하면 /alibaba/icbu/product/status/get/v2 또는 /alibaba/icbu/product/get/v2로 결과를 재확인하세요."
+    ]
+  };
+}
+
 async function exchangeAlibabaCode(input = {}) {
   const code = input.code || input.authorization_code || input.authorizationCode || "";
   if (!code) {
@@ -851,7 +1260,7 @@ async function getAlibabaAccessToken() {
   return tokenState.accessToken;
 }
 
-async function callAlibabaRestWithAccessToken(apiPath, params = {}) {
+async function callAlibabaRestWithAccessToken(apiPath, params = {}, options = {}) {
   const token = await getAlibabaAccessToken();
   if (!token) {
     const error = new Error("Alibaba access token is not configured.");
@@ -864,7 +1273,7 @@ async function callAlibabaRestWithAccessToken(apiPath, params = {}) {
     return await callAlibabaRest(apiPath, {
       ...params,
       access_token: token
-    });
+    }, options);
   } catch (error) {
     if (!canRefreshAlibabaToken() || !isAlibabaTokenError(error)) {
       throw error;
@@ -874,7 +1283,7 @@ async function callAlibabaRestWithAccessToken(apiPath, params = {}) {
     return callAlibabaRest(apiPath, {
       ...params,
       access_token: tokenState.accessToken
-    });
+    }, options);
   }
 }
 
@@ -1323,10 +1732,10 @@ async function callOpenAiJson(messages, schemaExample) {
 }
 
 async function callAlibaba(method, params = {}, options = {}) {
-  if (!config.alibabaAppKey || !config.alibabaAppSecret) {
-    const error = new Error("Alibaba app key/secret are not configured.");
+  if (!config.alibabaTopAppKey || !config.alibabaTopAppSecret) {
+    const error = new Error("Alibaba TOP app key/secret are not configured.");
     error.statusCode = 503;
-    error.code = "ALIBABA_NOT_CONFIGURED";
+    error.code = "ALIBABA_TOP_NOT_CONFIGURED";
     throw error;
   }
 
@@ -1334,7 +1743,7 @@ async function callAlibaba(method, params = {}, options = {}) {
   const signMethod = options.signMethod || config.alibabaTopSignMethod || "md5";
   const allParams = removeUndefined({
     method,
-    app_key: config.alibabaAppKey,
+    app_key: config.alibabaTopAppKey,
     sign_method: signMethod,
     timestamp: formatGmt8(new Date()),
     format: "json",
@@ -1344,7 +1753,7 @@ async function callAlibaba(method, params = {}, options = {}) {
     ...params
   });
 
-  allParams.sign = signTopParams(allParams, config.alibabaAppSecret, signMethod);
+  allParams.sign = signTopParams(allParams, config.alibabaTopAppSecret, signMethod);
 
   const response = await fetch(config.alibabaGateway, {
     method: "POST",
@@ -1360,13 +1769,15 @@ async function callAlibaba(method, params = {}, options = {}) {
     const error = new Error(apiError?.sub_msg || apiError?.msg || `Alibaba request failed with HTTP ${response.status}`);
     error.statusCode = 502;
     error.code = apiError?.code || "ALIBABA_REQUEST_FAILED";
+    error.details = apiError || body;
+    enrichAlibabaTopError(error);
     throw error;
   }
 
   return body;
 }
 
-async function callAlibabaRest(apiPath, params = {}) {
+async function callAlibabaRest(apiPath, params = {}, options = {}) {
   if (!config.alibabaAppKey || !config.alibabaAppSecret) {
     const error = new Error("Alibaba app key/secret are not configured.");
     error.statusCode = 503;
@@ -1375,21 +1786,28 @@ async function callAlibabaRest(apiPath, params = {}) {
   }
 
   const cleanPath = apiPath.startsWith("/") ? apiPath : `/${apiPath}`;
-  const allParams = removeUndefined({
+  const allParams = serializeAlibabaRestParams(removeUndefined({
     ...params,
     app_key: config.alibabaAppKey,
     sign_method: "sha256",
     timestamp: String(Date.now())
-  });
+  }));
 
   allParams.sign = signIopParams(cleanPath, allParams, config.alibabaAppSecret);
+  const requestBody = new URLSearchParams(allParams).toString();
+  const method = String(options.method || (requestBody.length > 1800 ? "POST" : "GET")).toUpperCase();
+  const url = method === "GET"
+    ? `${config.alibabaRestGateway}${cleanPath}?${requestBody}`
+    : `${config.alibabaRestGateway}${cleanPath}`;
 
-  const response = await fetch(`${config.alibabaRestGateway}${cleanPath}?${new URLSearchParams(allParams)}`, {
-    method: "GET",
-    headers: {
-      "Accept": "application/json"
-    }
-  });
+  const response = await fetch(url, removeUndefined({
+    method,
+    headers: removeUndefined({
+      "Accept": "application/json",
+      "Content-Type": method === "POST" ? "application/x-www-form-urlencoded;charset=UTF-8" : undefined
+    }),
+    body: method === "POST" ? requestBody : undefined
+  }));
 
   const body = await response.json().catch(() => ({}));
   if (!response.ok || body?.code && body.code !== "0") {
@@ -1401,6 +1819,15 @@ async function callAlibabaRest(apiPath, params = {}) {
   }
 
   return body;
+}
+
+function serializeAlibabaRestParams(params = {}) {
+  return Object.fromEntries(Object.entries(params).map(([key, value]) => {
+    if (value && typeof value === "object") {
+      return [key, JSON.stringify(value)];
+    }
+    return [key, String(value)];
+  }));
 }
 
 function signTopParams(params, secret, signMethod = "md5") {
@@ -1438,7 +1865,7 @@ function buildOpenApiSpec(baseUrl = config.baseUrl) {
     info: {
       title: "Alibaba Account Assistant API",
       version: APP_VERSION,
-      description: "ChatGPT Actions API for Alibaba buyer summaries, product recommendations, product search, and order briefs."
+      description: "ChatGPT Actions API for Alibaba buyer summaries, product recommendations, product search, safe product clone drafts, and order briefs."
     },
     servers: [{ url: baseUrl }],
     components: {
@@ -1543,6 +1970,114 @@ function buildOpenApiSpec(baseUrl = config.baseUrl) {
           },
           responses: {
             "200": { description: "Product search results" }
+          }
+        }
+      },
+      "/api/products/clone-draft": {
+        post: {
+          operationId: "draftOptimizedAlibabaProductClone",
+          summary: "Create a safe optimized draft for a new Alibaba listing based on an existing product",
+          description: "Draft-only. This endpoint does not create, update, or publish an Alibaba product.",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    product_id: {
+                      type: "string",
+                      description: "Existing Alibaba product id to use as the source product."
+                    },
+                    source_product: {
+                      type: "object",
+                      description: "Optional product object already fetched from Alibaba."
+                    },
+                    target_market: { type: "string" },
+                    positioning: { type: "string" },
+                    differentiation_points: {
+                      type: "array",
+                      items: { type: "string" }
+                    },
+                    buyer_keywords: {
+                      type: "array",
+                      items: { type: "string" }
+                    },
+                    language: { type: "string" },
+                    include_raw: { type: "boolean" }
+                  }
+                }
+              }
+            }
+          },
+          responses: {
+            "200": { description: "Draft-only optimized product clone plan with duplicate risk checks" }
+          }
+        }
+      },
+      "/api/products/listing/prepare": {
+        post: {
+          operationId: "prepareAlibabaProductListingPayload",
+          summary: "Prepare a reviewed Alibaba product listing payload without publishing",
+          description: "Review step only. This endpoint does not call Alibaba product create/update APIs.",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    clone_draft: { type: "object" },
+                    source_product: { type: "object" },
+                    listing_payload: { type: "object" },
+                    final_fields: {
+                      type: "object",
+                      properties: {
+                        title: { type: "string" },
+                        category_id: { type: "string" },
+                        images: { type: "array", items: { type: "string" } },
+                        detail_html: { type: "string" },
+                        attributes: { type: "object" },
+                        price: { type: "string" },
+                        moq: { type: "string" },
+                        shipping_template_id: { type: "string" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          responses: {
+            "200": { description: "Prepared listing payload and missing-field review" }
+          }
+        }
+      },
+      "/api/products/listing/publish": {
+        post: {
+          operationId: "publishAlibabaProductListing",
+          summary: "Publish a reviewed Alibaba product listing after explicit confirmation",
+          description: "Calls /alibaba/icbu/product/listing/v2 only when execute=true and confirmation_phrase is exactly '등록 실행'.",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["listing_payload", "confirmation_phrase", "execute"],
+                  properties: {
+                    listing_payload: { type: "object" },
+                    confirmation_phrase: { type: "string" },
+                    execute: { type: "boolean" },
+                    dry_run: { type: "boolean" },
+                    idempotency_key: { type: "string" }
+                  }
+                }
+              }
+            }
+          },
+          responses: {
+            "200": { description: "Alibaba listing publish result or confirmation-required refusal" }
           }
         }
       },
@@ -1972,6 +2507,649 @@ function normalizeProducts(products = []) {
   }).filter((product) => product.title || product.id || product.url);
 }
 
+function normalizeProductDetail(product = {}) {
+  const source = Array.isArray(product) ? product[0] || {} : product || {};
+  const images = normalizeImageList(source);
+  const id = String(source.id || source.product_id || source.productId || source.productID || "");
+  const productId = String(source.product_id || source.productId || source.productID || source.id || "");
+
+  return removeUndefined({
+    id,
+    product_id: productId,
+    title: source.subject || source.title || source.name || source.product_name || source.productName || "",
+    subject: source.subject || source.title || source.name || source.product_name || source.productName || "",
+    keywords: normalizeStringList(source.keywords || source.keyword || source.product_keywords || source.productKeywords),
+    image: images[0] || "",
+    images,
+    url: source.pc_detail_url || source.pcDetailUrl || source.detail_url || source.detailUrl || source.url || "",
+    status: source.status || source.product_status || source.productStatus || "",
+    display: source.display || source.display_status || source.displayStatus || "",
+    language: source.language || "",
+    category_id: source.category_id || source.categoryId || source.categoryID || "",
+    group_id: source.group_id || source.groupId || source.groupID || "",
+    group_name: source.group_name || source.groupName || "",
+    owner_member: source.owner_member || source.ownerMember || "",
+    owner_member_display_name: source.owner_member_display_name || source.ownerMemberDisplayName || "",
+    gmt_create: source.gmt_create || source.gmtCreate || "",
+    gmt_modified: source.gmt_modified || source.gmtModified || "",
+    product_type: source.product_type || source.productType || "",
+    specific: source.specific,
+    attributes: source.attributes || source.product_attributes || source.productAttributes,
+    sku: source.sku || source.skus,
+    rts: source.rts
+  });
+}
+
+function extractProductDetail(response = {}) {
+  const detailKeys = [
+    "product",
+    "product_info",
+    "productInfo",
+    "product_d_t_o",
+    "productDTO",
+    "product_detail",
+    "productDetail"
+  ];
+
+  for (const key of detailKeys) {
+    const value = findDeepValue(response, key);
+    if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  }
+
+  const products = findDeepArrayForKeys(response, ["products", "product_list", "productList", "product_infos"]);
+  if (products.length) return products[0];
+
+  const result = findDeepValue(response, "result");
+  if (result && typeof result === "object" && !Array.isArray(result)) return result;
+
+  return response;
+}
+
+function buildProductCloneDraftResult(input = {}) {
+  const sourceProduct = input.sourceProduct || {};
+  const context = input.context || {};
+  const sourceDraft = input.draft && typeof input.draft === "object"
+    ? input.draft
+    : buildFallbackProductCloneDraft(sourceProduct, context);
+  const duplicateRisk = buildDuplicateRiskReport(sourceProduct, context, sourceDraft.duplicate_risk);
+  const seoTitleCandidates = ensureArray(sourceDraft.seo_title_candidates).length
+    ? ensureArray(sourceDraft.seo_title_candidates).map((title) => truncateText(title, 120))
+    : generateCloneTitleCandidates(sourceProduct, context);
+  const keywords = ensureUnique([
+    ...ensureArray(sourceDraft.keywords),
+    ...deriveCloneKeywords(sourceProduct, context)
+  ]).slice(0, 20);
+  const detailSections = ensureArray(sourceDraft.detail_sections).length
+    ? ensureArray(sourceDraft.detail_sections).map(normalizeDetailSection).filter(Boolean)
+    : buildCloneDetailSections(sourceProduct, context);
+  const complianceWarnings = ensureUnique([
+    ...ensureArray(sourceDraft.compliance_warnings),
+    ...buildProductComplianceWarnings(sourceProduct)
+  ]);
+
+  const cloneDraft = removeUndefined({
+    draft_status: "draft_only",
+    source_product_id: sourceProduct.product_id || sourceProduct.id || "",
+    target_market: context.target_market,
+    positioning: context.positioning,
+    seo_title_candidates: seoTitleCandidates,
+    selected_title: seoTitleCandidates[0] || "",
+    short_description: sourceDraft.short_description || buildFallbackShortDescription(sourceProduct, context),
+    keywords,
+    detail_sections: detailSections,
+    attributes_to_review: ensureUnique([
+      ...ensureArray(sourceDraft.attributes_to_review),
+      "Alibaba category required attributes",
+      "Material, function, volume, package, origin, certification fields",
+      "Price, MOQ, sample, customization and shipping template"
+    ]),
+    images_to_review: ensureUnique([
+      ...ensureArray(sourceDraft.images_to_review),
+      sourceProduct.images?.length ? "Confirm whether source images can be reused or need new images." : "Add product images before listing."
+    ]),
+    duplicate_risk: duplicateRisk,
+    compliance_warnings: complianceWarnings,
+    required_next_inputs: buildCloneRequiredNextInputs(context),
+    listing_payload_preview: buildListingPayloadPreview(sourceProduct, context, sourceDraft, seoTitleCandidates, keywords)
+  });
+
+  return removeUndefined({
+    ok: true,
+    source: input.draftSource || "fallback",
+    detail_source: input.detail?.source,
+    source_product: sourceProduct,
+    clone_draft: cloneDraft,
+    safety_note_ko: "초안 전용입니다. Alibaba 신규 등록 API는 호출하지 않았고, 실제 등록 전에는 차별화 포인트와 필수 속성을 사람이 확인해야 합니다.",
+    next_actions: [
+      "차별화 포인트, 가격, MOQ, 패키지 구성, 배송 템플릿을 확정합니다.",
+      "중복 위험이 medium 이상이면 이미지, 제목, 구성 또는 타깃 시장을 명확히 바꿉니다.",
+      "확정 후에만 /alibaba/icbu/product/listing/v2 등록 API 연결을 검토합니다."
+    ],
+    note: input.detail?.note,
+    openai_error: sourceDraft.openai_error,
+    raw_product: input.includeRaw ? input.detail?.raw : undefined
+  });
+}
+
+function buildFallbackProductCloneDraft(sourceProduct = {}, context = {}) {
+  const titleCandidates = generateCloneTitleCandidates(sourceProduct, context);
+  const keywords = deriveCloneKeywords(sourceProduct, context);
+  return {
+    draft_status: "draft_only",
+    seo_title_candidates: titleCandidates,
+    short_description: buildFallbackShortDescription(sourceProduct, context),
+    detail_sections: buildCloneDetailSections(sourceProduct, context),
+    keywords,
+    attributes_to_review: [
+      "Category required attributes",
+      "Product function and ingredient claims",
+      "Price, MOQ, packaging and shipping template"
+    ],
+    images_to_review: [
+      "Decide whether to reuse source images or upload new differentiated images."
+    ],
+    duplicate_risk: buildDuplicateRiskReport(sourceProduct, context),
+    compliance_warnings: buildProductComplianceWarnings(sourceProduct),
+    listing_payload_preview: buildListingPayloadPreview(sourceProduct, context, {}, titleCandidates, keywords)
+  };
+}
+
+function buildDuplicateRiskReport(sourceProduct = {}, context = {}, upstreamRisk = {}) {
+  const diffPoints = normalizeStringList(context.differentiation_points);
+  const buyerKeywords = normalizeStringList(context.buyer_keywords);
+  const imageCount = Array.isArray(sourceProduct.images) ? sourceProduct.images.length : 0;
+  let score = 72;
+  if (!diffPoints.length) score += 13;
+  if (diffPoints.length >= 1) score -= 12;
+  if (diffPoints.length >= 3) score -= 13;
+  if (buyerKeywords.length) score -= 5;
+  if (imageCount) score += 5;
+  if (context.positioning) score -= 4;
+  score = clamp(Number(upstreamRisk.score || score), 0, 100);
+
+  const level = upstreamRisk.level || (score >= 70 ? "high" : score >= 40 ? "medium" : "low");
+  const reasons = ensureUnique([
+    ...ensureArray(upstreamRisk.reasons),
+    !diffPoints.length ? "원본 상품과 명확한 차별화 포인트가 아직 입력되지 않았습니다." : "",
+    imageCount ? "원본 이미지를 그대로 사용하면 중복 리스팅으로 보일 수 있습니다." : "",
+    sourceProduct.category_id ? "원본과 동일한 카테고리를 사용할 가능성이 높습니다." : "",
+    sourceProduct.title ? "상품명이 원본과 유사하면 검색 노출과 승인 측면에서 불리할 수 있습니다." : ""
+  ].filter(Boolean));
+
+  return {
+    level,
+    score,
+    reasons,
+    required_changes_before_publish: ensureUnique([
+      ...ensureArray(upstreamRisk.required_changes_before_publish),
+      "새 리스팅만의 타깃 바이어, 구성, 용량, 패키지, MOQ 또는 가격 전략을 확정합니다.",
+      "원본과 다른 대표 이미지 또는 상세 이미지 구성을 준비합니다.",
+      "제목과 키워드를 새 포지셔닝에 맞게 조정합니다.",
+      "카테고리 필수 속성과 효능 표현을 실제 상품 근거에 맞게 검토합니다."
+    ])
+  };
+}
+
+function generateCloneTitleCandidates(sourceProduct = {}, context = {}) {
+  const baseTitle = truncateText(sourceProduct.title || sourceProduct.subject || "Alibaba Product", 90);
+  const keywords = deriveCloneKeywords(sourceProduct, context).slice(0, 4);
+  const positioning = truncateText(context.positioning || "", 40);
+  const market = context.target_market && context.target_market !== "global" ? `${context.target_market} ` : "";
+  const brandOrGroup = sourceProduct.group_name || "";
+
+  return ensureUnique([
+    truncateText([market, baseTitle, keywords[0]].filter(Boolean).join(" "), 120),
+    truncateText([brandOrGroup, positioning, keywords.slice(0, 3).join(" ")].filter(Boolean).join(" "), 120),
+    truncateText([baseTitle, positioning || keywords.slice(0, 2).join(" ")].filter(Boolean).join(" - "), 120)
+  ]).filter(Boolean).slice(0, 3);
+}
+
+function deriveCloneKeywords(sourceProduct = {}, context = {}) {
+  const titleWords = String(sourceProduct.title || sourceProduct.subject || "")
+    .split(/[^a-zA-Z0-9가-힣]+/)
+    .map((word) => word.trim())
+    .filter((word) => word.length >= 3)
+    .slice(0, 12);
+
+  return ensureUnique([
+    ...normalizeStringList(context.buyer_keywords),
+    ...normalizeStringList(context.differentiation_points),
+    ...normalizeStringList(sourceProduct.keywords),
+    ...normalizeStringList(context.positioning),
+    ...titleWords
+  ]).slice(0, 20);
+}
+
+function buildFallbackShortDescription(sourceProduct = {}, context = {}) {
+  const title = sourceProduct.title || sourceProduct.subject || "This product";
+  const positioning = context.positioning ? ` positioned for ${context.positioning}` : "";
+  const market = context.target_market && context.target_market !== "global" ? ` in ${context.target_market}` : "";
+  return truncateText(`${title}${positioning}${market}. Review final claims, attributes, pricing, MOQ, and images before publishing.`, 260);
+}
+
+function buildCloneDetailSections(sourceProduct = {}, context = {}) {
+  const diffPoints = normalizeStringList(context.differentiation_points);
+  const keywords = deriveCloneKeywords(sourceProduct, context).slice(0, 6);
+  return [
+    {
+      heading: "Buyer positioning",
+      bullets: [
+        context.target_market ? `Target market: ${context.target_market}` : "Target market: confirm before publishing",
+        context.positioning ? `Positioning: ${context.positioning}` : "Positioning: add the new listing angle before publishing"
+      ]
+    },
+    {
+      heading: "Optimization focus",
+      bullets: [
+        keywords.length ? `SEO keywords: ${keywords.join(", ")}` : "Add buyer search keywords",
+        diffPoints.length ? `Differentiation: ${diffPoints.join(", ")}` : "Add concrete differences from the source listing"
+      ]
+    },
+    {
+      heading: "Source product reference",
+      bullets: [
+        sourceProduct.product_id || sourceProduct.id ? `Source product ID: ${sourceProduct.product_id || sourceProduct.id}` : "Source product ID: not provided",
+        sourceProduct.url ? `Source URL: ${sourceProduct.url}` : "Source URL: not provided"
+      ]
+    }
+  ];
+}
+
+function buildProductComplianceWarnings(sourceProduct = {}) {
+  const text = `${sourceProduct.title || ""} ${sourceProduct.subject || ""} ${normalizeStringList(sourceProduct.keywords).join(" ")}`.toLowerCase();
+  const warnings = [
+    "Do not invent certifications, clinical results, prices, MOQ, delivery time, stock, or origin.",
+    "Confirm Alibaba category required attributes before creating the new listing.",
+    "Use a human approval step before any product create/update API call."
+  ];
+
+  if (/whitening|blemish|acne|anti[-\s]?wrinkle|firming|medical|treatment|pigmentation/.test(text)) {
+    warnings.push("Cosmetic efficacy claims such as whitening, blemish, acne, anti-wrinkle, firming, or pigmentation should be verified against actual product evidence and local advertising rules.");
+  }
+
+  return warnings;
+}
+
+function buildCloneRequiredNextInputs(context = {}) {
+  const required = [
+    "new listing differentiation points",
+    "target buyer/market",
+    "price and MOQ",
+    "package, volume, set composition, and customization options",
+    "shipping template and lead time",
+    "image reuse/new image decision"
+  ];
+
+  if (!normalizeStringList(context.differentiation_points).length) {
+    required.unshift("at least 2-3 concrete differences from the source product");
+  }
+
+  return ensureUnique(required);
+}
+
+function buildListingPayloadPreview(sourceProduct = {}, context = {}, draft = {}, titleCandidates = [], keywords = []) {
+  return removeUndefined({
+    mode: "preview_only",
+    api_not_called: true,
+    intended_api: "/alibaba/icbu/product/listing/v2",
+    source_product_id: sourceProduct.product_id || sourceProduct.id || "",
+    title: draft.selected_title || titleCandidates[0] || "",
+    category_id: sourceProduct.category_id || "",
+    group_id: sourceProduct.group_id || "",
+    group_name: sourceProduct.group_name || "",
+    language: context.language || sourceProduct.language || "English",
+    keywords: keywords.slice(0, 10),
+    images: Array.isArray(sourceProduct.images) ? sourceProduct.images.slice(0, 10) : [],
+    product_type: sourceProduct.product_type || "",
+    requires_manual_mapping: true,
+    required_before_api_call: [
+      "Map this preview into Alibaba listing schema.",
+      "Fill every required category attribute.",
+      "Confirm title, images, price, MOQ, logistics and compliance claims."
+    ]
+  });
+}
+
+function normalizeFinalListingFields(fields = {}) {
+  const images = normalizeImageList(fields);
+  return removeUndefined({
+    title: fields.title || fields.subject || "",
+    subject: fields.subject || fields.title || "",
+    category_id: fields.category_id || fields.categoryId || "",
+    group_id: fields.group_id || fields.groupId || "",
+    group_name: fields.group_name || fields.groupName || "",
+    language: fields.language || "",
+    keywords: normalizeStringList(fields.keywords),
+    images,
+    detail_html: fields.detail_html || fields.detailHtml || fields.details || fields.description || "",
+    attributes: fields.attributes || fields.product_attributes || fields.productAttributes,
+    sku: fields.sku || fields.skus,
+    price: fields.price || fields.fob_price || fields.fobPrice || "",
+    price_range: fields.price_range || fields.priceRange,
+    moq: fields.moq || fields.min_order_quantity || fields.minOrderQuantity || "",
+    shipping_template_id: fields.shipping_template_id || fields.shippingTemplateId || "",
+    package_info: fields.package_info || fields.packageInfo || "",
+    lead_time: fields.lead_time || fields.leadTime || "",
+    customization: fields.customization || "",
+    duplicate_risk_acknowledged: fields.duplicate_risk_acknowledged === true || fields.duplicateRiskAcknowledged === true
+  });
+}
+
+function normalizeAlibabaListingPayload(payload = {}) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return {};
+  return removeUndefined(Object.fromEntries(Object.entries(payload)
+    .filter(([key]) => !String(key).startsWith("_"))
+    .map(([key, value]) => [key, value])));
+}
+
+function buildAlibabaListingPayloadCandidate(cloneDraft = {}, sourceProduct = {}, finalFields = {}) {
+  const preview = cloneDraft.listing_payload_preview || {};
+  const title = finalFields.title || finalFields.subject || cloneDraft.selected_title || preview.title || "";
+  const keywords = ensureUnique([
+    ...normalizeStringList(finalFields.keywords),
+    ...normalizeStringList(cloneDraft.keywords),
+    ...normalizeStringList(preview.keywords)
+  ]).slice(0, 20);
+  const images = ensureUnique([
+    ...ensureArray(finalFields.images),
+    ...ensureArray(preview.images),
+    ...ensureArray(sourceProduct.images)
+  ]).filter(Boolean);
+
+  const product = removeUndefined({
+    subject: title,
+    title,
+    category_id: finalFields.category_id || preview.category_id || sourceProduct.category_id || "",
+    group_id: finalFields.group_id || preview.group_id || sourceProduct.group_id || "",
+    group_name: finalFields.group_name || preview.group_name || sourceProduct.group_name || "",
+    language: finalFields.language || preview.language || sourceProduct.language || "English",
+    keywords,
+    images,
+    detail_html: finalFields.detail_html || buildDetailHtmlFromDraft(cloneDraft),
+    attributes: finalFields.attributes,
+    sku: finalFields.sku,
+    price: finalFields.price,
+    price_range: finalFields.price_range,
+    moq: finalFields.moq,
+    shipping_template_id: finalFields.shipping_template_id,
+    package_info: finalFields.package_info,
+    lead_time: finalFields.lead_time,
+    customization: finalFields.customization,
+    source_product_id: cloneDraft.source_product_id || sourceProduct.product_id || sourceProduct.id || "",
+    duplicate_risk_acknowledged: finalFields.duplicate_risk_acknowledged
+  });
+
+  return {
+    product,
+    _client_note: "Review and map this product object to Alibaba's exact listing/v2 schema before publish if API Explorer requires different parameter names."
+  };
+}
+
+function stripInternalListingPayload(payload = {}) {
+  const clean = normalizeAlibabaListingPayload(payload);
+  if (clean.product && typeof clean.product === "object" && !Array.isArray(clean.product)) {
+    clean.product = removeUndefined(Object.fromEntries(Object.entries(clean.product)
+      .filter(([key]) => !["source_product_id", "duplicate_risk_acknowledged"].includes(key))));
+  }
+  return clean;
+}
+
+function validateListingPayloadReadiness(listingPayload = {}, cloneDraft = {}, finalFields = {}) {
+  const product = getListingProductObject(listingPayload);
+  const missing = [];
+  const warnings = [];
+  const duplicateRisk = cloneDraft.duplicate_risk || {};
+
+  if (!hasFinalValue(product.subject || product.title)) missing.push("상품명/title");
+  if (!hasFinalValue(product.category_id || product.categoryId)) missing.push("카테고리/category_id");
+  if (!hasNonEmptyCollection(product.images) && !product.image && !product.image_urls) missing.push("대표 이미지/images");
+  if (!hasFinalValue(product.detail_html || product.description || product.details)) missing.push("상세 설명/detail_html");
+  if (!hasFinalObject(product.attributes)) missing.push("카테고리 필수 속성/attributes");
+  if (!hasFinalValue(product.price || product.price_range || product.fob_price)) missing.push("가격/price");
+  if (!hasFinalValue(product.moq || product.min_order_quantity || product.minOrderQuantity)) missing.push("MOQ");
+  if (!hasFinalValue(product.shipping_template_id || product.shippingTemplateId)) missing.push("배송 템플릿/shipping_template_id");
+
+  if (duplicateRisk.level === "high" && finalFields.duplicate_risk_acknowledged !== true) {
+    warnings.push("중복 위험이 high입니다. 이미지/구성/타깃/제목 차별화 확인이 필요합니다.");
+  }
+  if (String(product.subject || product.title || "").length > 128) {
+    warnings.push("상품명이 길 수 있습니다. Alibaba 제목 제한을 확인하세요.");
+  }
+  if (product._client_note || listingPayload._client_note) {
+    warnings.push("현재 payload는 후보 구조입니다. API Explorer에서 요구하는 정확한 listing/v2 파라미터명으로 매핑해야 할 수 있습니다.");
+  }
+
+  return {
+    ready: missing.length === 0,
+    missing,
+    warnings,
+    required_confirmation_phrase: PRODUCT_PUBLISH_CONFIRMATION_PHRASE
+  };
+}
+
+function getListingProductObject(listingPayload = {}) {
+  if (listingPayload.product && typeof listingPayload.product === "object") return listingPayload.product;
+  if (typeof listingPayload.product === "string") {
+    const text = listingPayload.product.trim();
+    if (text.startsWith("{")) {
+      try {
+        return JSON.parse(text);
+      } catch {
+        return listingPayload;
+      }
+    }
+  }
+  return listingPayload;
+}
+
+function buildListingHumanReviewChecklist(readiness = {}) {
+  return [
+    "상품명과 키워드가 원본과 충분히 다르게 최적화되었는지 확인",
+    "카테고리와 필수 속성이 Alibaba 요구사항에 맞는지 확인",
+    "이미지 사용 권한과 중복 이미지 위험 확인",
+    "가격, MOQ, 샘플, 패키지, 배송 템플릿 확인",
+    "효능/인증/성분/원산지 표현이 실제 근거와 일치하는지 확인",
+    readiness.ready ? `모든 항목 확인 후 '${PRODUCT_PUBLISH_CONFIRMATION_PHRASE}'로 등록 승인` : "누락 항목 보완 후 다시 payload 준비"
+  ];
+}
+
+function buildDetailHtmlFromDraft(cloneDraft = {}) {
+  const sections = ensureArray(cloneDraft.detail_sections);
+  if (!sections.length && cloneDraft.short_description) {
+    return `<p>${escapeHtml(cloneDraft.short_description)}</p>`;
+  }
+  return sections.map((section) => {
+    const heading = escapeHtml(section.heading || "Product Details");
+    const bullets = ensureArray(section.bullets)
+      .map((item) => `<li>${escapeHtml(item)}</li>`)
+      .join("");
+    return `<h3>${heading}</h3>${bullets ? `<ul>${bullets}</ul>` : ""}`;
+  }).join("\n");
+}
+
+function hasNonEmptyCollection(value) {
+  if (Array.isArray(value)) return value.filter(Boolean).length > 0;
+  if (typeof value === "string") return value.trim().length > 0;
+  return false;
+}
+
+function hasNonEmptyObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length > 0;
+}
+
+function hasFinalValue(value) {
+  if (Array.isArray(value)) return value.some((item) => hasFinalValue(item));
+  if (value && typeof value === "object") return hasFinalObject(value);
+  const text = String(value || "").trim();
+  if (!text) return false;
+  return !/(confirm|tbd|todo|pending|placeholder|sample|확인|미정|필요|샘플)/i.test(text);
+}
+
+function hasFinalObject(value) {
+  if (!hasNonEmptyObject(value)) return false;
+  return Object.values(value).some((item) => hasFinalValue(item));
+}
+
+function normalizeDetailSection(section) {
+  if (!section) return undefined;
+  if (typeof section === "string") {
+    return { heading: section, bullets: [] };
+  }
+  return removeUndefined({
+    heading: section.heading || section.title || "",
+    bullets: ensureArray(section.bullets || section.items).map(String).filter(Boolean)
+  });
+}
+
+function normalizeImageList(product = {}) {
+  const candidates = [
+    product?.main_image?.images,
+    product?.mainImage?.images,
+    product?.product_image?.images,
+    product?.productImage?.images,
+    product?.images,
+    product?.image,
+    product?.image_url,
+    product?.imageUrl,
+    product?.main_image,
+    product?.mainImage
+  ];
+  const images = [];
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    if (Array.isArray(candidate)) {
+      for (const item of candidate) {
+        if (typeof item === "string") images.push(item);
+        if (item && typeof item === "object") images.push(item.url || item.image_url || item.imageUrl || "");
+      }
+      continue;
+    }
+    if (typeof candidate === "string") {
+      images.push(...candidate.split(/[,\n]/));
+      continue;
+    }
+    if (typeof candidate === "object") {
+      images.push(candidate.url || candidate.image_url || candidate.imageUrl || "");
+    }
+  }
+
+  return ensureUnique(images.map((image) => String(image || "").trim()).filter(Boolean));
+}
+
+function normalizeStringList(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) {
+    return ensureUnique(value.map((item) => String(item || "").trim()).filter(Boolean));
+  }
+  if (typeof value === "string") {
+    return ensureUnique(value.split(/[,\n;]+/).map((item) => item.trim()).filter(Boolean));
+  }
+  return [String(value).trim()].filter(Boolean);
+}
+
+function ensureArray(value) {
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function ensureUnique(values = []) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values) {
+    const text = typeof value === "string" ? value.trim() : value;
+    const key = typeof text === "string" ? text.toLowerCase() : JSON.stringify(text);
+    if (!text || seen.has(key)) continue;
+    seen.add(key);
+    result.push(text);
+  }
+  return result;
+}
+
+function formatProductCloneDraftText(value = {}) {
+  const source = value.source_product || {};
+  const draft = value.clone_draft || {};
+  const risk = draft.duplicate_risk || {};
+  const titleLines = ensureArray(draft.seo_title_candidates)
+    .slice(0, 5)
+    .map((title, index) => `${index + 1}. ${title}`);
+  const sections = ensureArray(draft.detail_sections)
+    .slice(0, 5)
+    .map((section) => {
+      const bullets = ensureArray(section.bullets).slice(0, 5).map((item) => `- ${item}`).join("\n");
+      return `[${section.heading || "Section"}]\n${bullets}`;
+    });
+
+  return [
+    "[소스 상품]",
+    `- 상품 ID: ${source.product_id || source.id || "확인 필요"}`,
+    `- 상품명: ${source.title || source.subject || "확인 필요"}`,
+    source.url ? `- URL: ${source.url}` : "",
+    "",
+    "[신규 등록 최적화 초안]",
+    titleLines.join("\n"),
+    draft.short_description ? `\n요약: ${draft.short_description}` : "",
+    draft.keywords?.length ? `\n키워드: ${draft.keywords.slice(0, 12).join(", ")}` : "",
+    "",
+    "[상세 구성]",
+    sections.join("\n\n"),
+    "",
+    "[중복 위험]",
+    `- 수준: ${risk.level || "unknown"} (${risk.score ?? "n/a"}/100)`,
+    ...ensureArray(risk.reasons).slice(0, 5).map((reason) => `- ${reason}`),
+    "",
+    "[등록 전 확인]",
+    ...ensureArray(draft.required_next_inputs).slice(0, 8).map((item) => `- ${item}`),
+    "",
+    value.safety_note_ko || ""
+  ].filter(Boolean).join("\n");
+}
+
+function formatListingPreparationText(value = {}) {
+  const prep = value.listing_preparation || {};
+  const missing = ensureArray(prep.missing_fields);
+  const warnings = ensureArray(prep.warnings);
+  return [
+    "[등록 준비 상태]",
+    `- 실제 등록 호출: 하지 않음`,
+    `- 등록 가능 상태: ${prep.ready_to_publish ? "가능" : "보완 필요"}`,
+    `- API: ${prep.api_path || ALIBABA_PRODUCT_LISTING_API}`,
+    "",
+    missing.length ? "[부족한 항목]\n" + missing.map((item) => `- ${item}`).join("\n") : "[부족한 항목]\n- 없음",
+    warnings.length ? "\n[주의]\n" + warnings.map((item) => `- ${item}`).join("\n") : "",
+    "",
+    "[실제 등록 조건]",
+    `- execute: true`,
+    `- confirmation_phrase: ${PRODUCT_PUBLISH_CONFIRMATION_PHRASE}`,
+    "",
+    "[다음 단계]",
+    ...(ensureArray(value.next_actions).length ? ensureArray(value.next_actions).map((item) => `- ${item}`) : ["- 최종 정보를 확인한 뒤 실제 등록 도구를 호출하세요."])
+  ].filter(Boolean).join("\n");
+}
+
+function formatProductPublishResultText(value = {}) {
+  const result = value.publish_result || {};
+  if (!result.executed) {
+    return [
+      "[등록 실행 안 됨]",
+      `- 이유: ${result.reason || (result.dry_run ? "dry_run" : "승인 조건 미충족")}`,
+      `- 필요한 승인 문구: ${result.required_confirmation_phrase || PRODUCT_PUBLISH_CONFIRMATION_PHRASE}`,
+      `- execute: ${result.required_execute === true ? "true 필요" : "확인 필요"}`
+    ].join("\n");
+  }
+
+  return [
+    "[등록 실행 완료]",
+    `- API: ${result.api_path || ALIBABA_PRODUCT_LISTING_API}`,
+    result.product_id ? `- product_id: ${result.product_id}` : "",
+    result.task_id ? `- task_id: ${result.task_id}` : "",
+    `- 상태: ${result.status || "submitted"}`,
+    "",
+    "[다음 확인]",
+    ...(ensureArray(value.next_actions).map((item) => `- ${item}`))
+  ].filter(Boolean).join("\n");
+}
+
 function normalizeConversations(conversations = []) {
   return conversations.map((conversation) => {
     const latest = conversation.latest_message_time || conversation.latestMessageTime || conversation.gmt_modified || "";
@@ -2127,6 +3305,27 @@ function isAlibabaConfigured() {
 
 function canRefreshAlibabaToken() {
   return Boolean(config.alibabaAppKey && config.alibabaAppSecret && tokenState.refreshToken);
+}
+
+function enrichAlibabaTopError(error) {
+  const details = error.details || {};
+  const text = [
+    error.code,
+    error.message,
+    details.code,
+    details.msg,
+    details.sub_code,
+    details.sub_msg
+  ].filter(Boolean).join(" ").toLowerCase();
+
+  if (text.includes("invalid app key") || text.includes("invalid appkey") || String(error.code) === "29") {
+    error.code = "ALIBABA_TOP_INVALID_APP_KEY";
+    error.message = [
+      "Alibaba TOP gateway rejected the app key.",
+      "The configured ALIBABA_APP_KEY works for Alibaba OpenAPI REST, but this IM API is a Taobao TOP API and may require a separate TOP/OKKI&TM app key.",
+      "Set ALIBABA_TOP_APP_KEY and ALIBABA_TOP_APP_SECRET after Alibaba grants that app/API permission."
+    ].join(" ");
+  }
 }
 
 function parseBoolean(value, fallback = false) {
