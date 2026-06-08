@@ -20,6 +20,7 @@ const config = {
   alibabaTopAppSecret: process.env.ALIBABA_TOP_APP_SECRET || process.env.ALIBABA_APP_SECRET || "",
   alibabaAccessToken: process.env.ALIBABA_ACCESS_TOKEN || "",
   alibabaRefreshToken: process.env.ALIBABA_REFRESH_TOKEN || "",
+  alibabaAuthUrl: process.env.ALIBABA_AUTH_URL || "https://openapi-auth.alibaba.com/oauth/authorize",
   alibabaGateway: process.env.ALIBABA_GATEWAY || "https://eco.taobao.com/router/rest",
   alibabaRestGateway: process.env.ALIBABA_REST_GATEWAY || "https://openapi-api.alibaba.com/rest",
   alibabaSelfAccountId: process.env.ALIBABA_SELF_ACCOUNT_ID || "",
@@ -76,22 +77,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (routeKey === "GET /api/alibaba/status") {
-      return sendJson(res, 200, {
-        configured: isAlibabaConfigured(),
-        hasAppKey: Boolean(config.alibabaAppKey),
-        hasAppSecret: Boolean(config.alibabaAppSecret),
-        hasTopAppKey: Boolean(config.alibabaTopAppKey),
-        hasTopAppSecret: Boolean(config.alibabaTopAppSecret),
-        topAppKeyUsesRestAppKey: config.alibabaTopAppKey === config.alibabaAppKey,
-        hasAccessToken: Boolean(tokenState.accessToken),
-        hasRefreshToken: Boolean(tokenState.refreshToken),
-        accessTokenExpiresAt: toIsoOrNull(tokenState.accessTokenExpiresAt),
-        refreshTokenExpiresAt: toIsoOrNull(tokenState.refreshTokenExpiresAt),
-        lastRefreshAt: toIsoOrNull(tokenState.lastRefreshAt),
-        canAutoRefresh: canRefreshAlibabaToken(),
-        hasSelfAccountId: Boolean(config.alibabaSelfAccountId),
-        gateway: config.alibabaGateway
-      });
+      return sendJson(res, 200, buildAlibabaConnectionStatus(getExternalBaseUrl(req)));
+    }
+
+    if (routeKey === "GET /api/alibaba/oauth/authorize-url") {
+      return sendJson(res, 200, buildAlibabaAuthorizeUrlResult(getExternalBaseUrl(req), url.searchParams.get("state") || ""));
     }
 
     if (routeKey === "POST /api/alibaba/oauth/token") {
@@ -166,11 +156,7 @@ const server = http.createServer(async (req, res) => {
     sendJson(res, 404, { ok: false, error: "Not found" });
   } catch (error) {
     const status = error.statusCode || 500;
-    sendJson(res, status, {
-      ok: false,
-      error: error.message,
-      code: error.code || "SERVER_ERROR"
-    });
+    sendJson(res, status, formatErrorPayload(error, req));
   }
 });
 
@@ -692,24 +678,7 @@ async function callMcpTool(params = {}) {
 
   switch (name) {
     case "alibaba_connection_status":
-      return mcpToolResult({
-        configured: isAlibabaConfigured(),
-        hasAppKey: Boolean(config.alibabaAppKey),
-        hasAppSecret: Boolean(config.alibabaAppSecret),
-        hasTopAppKey: Boolean(config.alibabaTopAppKey),
-        hasTopAppSecret: Boolean(config.alibabaTopAppSecret),
-        topAppKeyUsesRestAppKey: config.alibabaTopAppKey === config.alibabaAppKey,
-        hasAccessToken: Boolean(tokenState.accessToken),
-        hasRefreshToken: Boolean(tokenState.refreshToken),
-        accessTokenExpiresAt: toIsoOrNull(tokenState.accessTokenExpiresAt),
-        refreshTokenExpiresAt: toIsoOrNull(tokenState.refreshTokenExpiresAt),
-        lastRefreshAt: toIsoOrNull(tokenState.lastRefreshAt),
-        canAutoRefresh: canRefreshAlibabaToken(),
-        hasSelfAccountId: Boolean(config.alibabaSelfAccountId),
-        gateway: config.alibabaGateway,
-        restGateway: config.alibabaRestGateway,
-        openaiConfigured: Boolean(config.openaiApiKey)
-      }, "Alibaba 연결 상태를 확인했습니다.");
+      return mcpToolResult(buildAlibabaConnectionStatus(config.baseUrl), "Alibaba 연결 상태를 확인했습니다.");
 
     case "search_alibaba_products":
       return mcpToolResult(await searchProducts(args), "Alibaba 상품 검색 결과입니다.");
@@ -1227,6 +1196,102 @@ async function exchangeAlibabaCode(input = {}) {
   };
 }
 
+function buildAlibabaConnectionStatus(baseUrl = config.baseUrl) {
+  return {
+    configured: isAlibabaConfigured(),
+    hasAppKey: Boolean(config.alibabaAppKey),
+    hasAppSecret: Boolean(config.alibabaAppSecret),
+    hasTopAppKey: Boolean(config.alibabaTopAppKey),
+    hasTopAppSecret: Boolean(config.alibabaTopAppSecret),
+    topAppKeyUsesRestAppKey: config.alibabaTopAppKey === config.alibabaAppKey,
+    hasAccessToken: Boolean(tokenState.accessToken),
+    hasRefreshToken: Boolean(tokenState.refreshToken),
+    accessTokenExpiresAt: toIsoOrNull(tokenState.accessTokenExpiresAt),
+    refreshTokenExpiresAt: toIsoOrNull(tokenState.refreshTokenExpiresAt),
+    lastRefreshAt: toIsoOrNull(tokenState.lastRefreshAt),
+    canAutoRefresh: canRefreshAlibabaToken(),
+    hasSelfAccountId: Boolean(config.alibabaSelfAccountId),
+    gateway: config.alibabaGateway,
+    restGateway: config.alibabaRestGateway,
+    openaiConfigured: Boolean(config.openaiApiKey),
+    tokenHealth: buildAlibabaTokenHealth(baseUrl)
+  };
+}
+
+function buildAlibabaTokenHealth(baseUrl = config.baseUrl) {
+  const hasAccessToken = Boolean(tokenState.accessToken);
+  const hasRefreshToken = Boolean(tokenState.refreshToken);
+  const accessExpired = Boolean(tokenState.accessTokenExpiresAt && Date.now() >= tokenState.accessTokenExpiresAt);
+  const refreshExpired = Boolean(tokenState.refreshTokenExpiresAt && Date.now() >= tokenState.refreshTokenExpiresAt);
+
+  if (!hasAccessToken && !hasRefreshToken) {
+    return {
+      status: "missing_tokens",
+      can_auto_refresh: false,
+      reauthorization_required: true,
+      authorize_url: buildAlibabaAuthorizeUrl(baseUrl),
+      next_step_ko: "Alibaba OAuth 재인증으로 새 access_token과 refresh_token을 발급받아 Render 환경변수에 저장하세요."
+    };
+  }
+
+  if (refreshExpired) {
+    return {
+      status: "refresh_token_expired",
+      can_auto_refresh: false,
+      reauthorization_required: true,
+      authorize_url: buildAlibabaAuthorizeUrl(baseUrl),
+      next_step_ko: "Refresh token이 만료되었습니다. Alibaba OAuth 재인증이 필요합니다."
+    };
+  }
+
+  if (accessExpired && hasRefreshToken) {
+    return {
+      status: "access_token_expired_refresh_available",
+      can_auto_refresh: true,
+      reauthorization_required: false,
+      next_step_ko: "Access token은 만료되었지만 refresh token으로 자동 갱신을 시도할 수 있습니다."
+    };
+  }
+
+  if (hasAccessToken && !tokenState.accessTokenExpiresAt) {
+    return {
+      status: "access_token_expiry_unknown",
+      can_auto_refresh: canRefreshAlibabaToken(),
+      reauthorization_required: false,
+      next_step_ko: "Access token 만료 시각이 저장되어 있지 않습니다. IllegalAccessToken이 발생하면 자동 갱신 또는 재인증이 필요합니다."
+    };
+  }
+
+  return {
+    status: "ready",
+    can_auto_refresh: canRefreshAlibabaToken(),
+    reauthorization_required: false,
+    next_step_ko: "현재 설정으로 Alibaba API 호출을 시도할 수 있습니다."
+  };
+}
+
+function buildAlibabaAuthorizeUrlResult(baseUrl = config.baseUrl, state = "") {
+  return {
+    ok: true,
+    authorize_url: buildAlibabaAuthorizeUrl(baseUrl, state),
+    callback_url: buildAlibabaCallbackUrl(baseUrl),
+    next_step_ko: "authorize_url을 브라우저에서 열어 Alibaba 로그인/승인을 완료한 뒤 callback에 표시되는 code를 /api/alibaba/oauth/token에 전달하세요."
+  };
+}
+
+function buildAlibabaAuthorizeUrl(baseUrl = config.baseUrl, state = "") {
+  const url = new URL(config.alibabaAuthUrl);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("client_id", config.alibabaAppKey || "");
+  url.searchParams.set("redirect_uri", buildAlibabaCallbackUrl(baseUrl));
+  if (state) url.searchParams.set("state", state);
+  return url.toString();
+}
+
+function buildAlibabaCallbackUrl(baseUrl = config.baseUrl) {
+  return `${String(baseUrl || config.baseUrl).replace(/\/+$/, "")}/api/alibaba/oauth/callback`;
+}
+
 async function refreshAlibabaAccessToken(options = {}) {
   const refreshToken = options.refreshToken || tokenState.refreshToken;
   if (!refreshToken) {
@@ -1275,16 +1340,45 @@ async function callAlibabaRestWithAccessToken(apiPath, params = {}, options = {}
       access_token: token
     }, options);
   } catch (error) {
-    if (!canRefreshAlibabaToken() || !isAlibabaTokenError(error)) {
+    if (!isAlibabaTokenError(error)) {
       throw error;
     }
 
-    await refreshAlibabaAccessToken({ force: true });
-    return callAlibabaRest(apiPath, {
-      ...params,
-      access_token: tokenState.accessToken
-    }, options);
+    if (!canRefreshAlibabaToken()) {
+      throw createAlibabaReauthorizationError(error);
+    }
+
+    try {
+      await refreshAlibabaAccessToken({ force: true });
+    } catch (refreshError) {
+      throw createAlibabaReauthorizationError(error, refreshError);
+    }
+
+    try {
+      return await callAlibabaRest(apiPath, {
+        ...params,
+        access_token: tokenState.accessToken
+      }, options);
+    } catch (retryError) {
+      if (isAlibabaTokenError(retryError)) {
+        throw createAlibabaReauthorizationError(retryError);
+      }
+      throw retryError;
+    }
   }
+}
+
+function createAlibabaReauthorizationError(originalError, refreshError) {
+  const error = new Error("Alibaba token is invalid or expired. Reauthorization is required.");
+  error.statusCode = 401;
+  error.code = "ALIBABA_REAUTH_REQUIRED";
+  error.details = removeUndefined({
+    original_code: originalError?.code,
+    original_message: originalError?.message,
+    refresh_code: refreshError?.code,
+    refresh_message: refreshError?.message
+  });
+  return error;
 }
 
 function updateAlibabaTokenState(response, fallbackRefreshToken = tokenState.refreshToken) {
@@ -1920,6 +2014,15 @@ function buildOpenApiSpec(baseUrl = config.baseUrl) {
           },
           responses: {
             "200": { description: "Alibaba access token response" }
+          }
+        }
+      },
+      "/api/alibaba/oauth/authorize-url": {
+        get: {
+          operationId: "getAlibabaAuthorizationUrl",
+          summary: "Get an Alibaba OAuth authorization URL for reauthorization",
+          responses: {
+            "200": { description: "Alibaba OAuth authorization URL and callback URL" }
           }
         }
       },
@@ -3437,7 +3540,7 @@ function isAlibabaConfigured() {
 }
 
 function canRefreshAlibabaToken() {
-  return Boolean(config.alibabaAppKey && config.alibabaAppSecret && tokenState.refreshToken);
+  return Boolean(config.alibabaAppKey && config.alibabaAppSecret && tokenState.refreshToken && !isTimestampExpired(tokenState.refreshTokenExpiresAt));
 }
 
 function enrichAlibabaTopError(error) {
@@ -3475,6 +3578,10 @@ function isTokenExpiringSoon(expiresAt) {
   return Date.now() + TOKEN_REFRESH_SAFETY_MS >= expiresAt;
 }
 
+function isTimestampExpired(expiresAt) {
+  return Boolean(expiresAt && Date.now() >= expiresAt);
+}
+
 function isAlibabaTokenError(error) {
   const details = error?.details || {};
   const haystack = [
@@ -3490,7 +3597,36 @@ function isAlibabaTokenError(error) {
     || haystack.includes("session")
     || haystack.includes("expired")
     || haystack.includes("invalid authorization")
+    || haystack.includes("illegalaccesstoken")
+    || haystack.includes("illegal access token")
     || haystack.includes("access_token");
+}
+
+function formatErrorPayload(error, req) {
+  const baseUrl = req ? getExternalBaseUrl(req) : config.baseUrl;
+  const payload = {
+    ok: false,
+    error: error.message,
+    code: error.code || "SERVER_ERROR"
+  };
+
+  if (error.code === "ALIBABA_REAUTH_REQUIRED" || isAlibabaTokenError(error)) {
+    return {
+      ...payload,
+      reauthorization_required: true,
+      authorize_url: buildAlibabaAuthorizeUrl(baseUrl),
+      callback_url: buildAlibabaCallbackUrl(baseUrl),
+      next_step_ko: "Alibaba access token 또는 refresh token이 만료되었습니다. authorize_url에서 재인증한 뒤 새 access_token/refresh_token을 Render 환경변수에 저장하고 재배포하세요.",
+      token_error: removeUndefined({
+        original_code: error.details?.original_code || error.code,
+        original_message: error.details?.original_message || error.message,
+        refresh_code: error.details?.refresh_code,
+        refresh_message: error.details?.refresh_message
+      })
+    };
+  }
+
+  return payload;
 }
 
 function parseDateMs(value) {

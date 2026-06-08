@@ -34,6 +34,7 @@ ALIBABA_ACCESS_TOKEN=...
 ALIBABA_REFRESH_TOKEN=...
 ALIBABA_ACCESS_TOKEN_EXPIRES_AT=...
 ALIBABA_REFRESH_TOKEN_EXPIRES_AT=...
+ALIBABA_AUTH_URL=https://openapi-auth.alibaba.com/oauth/authorize
 ALIBABA_GATEWAY=https://eco.taobao.com/router/rest
 ALIBABA_REST_GATEWAY=https://openapi-api.alibaba.com/rest
 ALIBABA_SELF_ACCOUNT_ID=...
@@ -124,6 +125,7 @@ ChatGPT Settings
 
 - `GET /api/alibaba/status`
 - `POST /mcp`
+- `GET /api/alibaba/oauth/authorize-url`
 - `POST /api/alibaba/oauth/refresh`
 - `POST /api/products/search`
 - `POST /api/products/clone-draft`
@@ -145,6 +147,35 @@ ChatGPT Settings
 → 추천 이유, 다음 확인 질문, 바이어용 답변, 한국어 번역 생성
 → ChatGPT에 추천 상품 URL 표시
 ```
+
+## Alibaba 토큰 오류 해결
+
+`IllegalAccessToken`이 나오면 access token이 만료되었거나 refresh token까지 만료된 상태입니다.
+
+1. 먼저 연결 상태를 확인합니다.
+
+```text
+https://chatgpt-alibaba-app.onrender.com/api/alibaba/status
+```
+
+2. `tokenHealth.reauthorization_required`가 `true`이면 재인증 URL을 확인합니다.
+
+```text
+https://chatgpt-alibaba-app.onrender.com/api/alibaba/oauth/authorize-url
+```
+
+3. `authorize_url`을 브라우저에서 열어 Alibaba 승인을 완료합니다.
+4. callback 화면에 표시된 `code`로 `/api/alibaba/oauth/token`을 호출해 새 토큰을 발급합니다.
+5. Render 환경변수의 아래 값을 새 값으로 교체한 뒤 재배포합니다.
+
+```text
+ALIBABA_ACCESS_TOKEN
+ALIBABA_REFRESH_TOKEN
+ALIBABA_ACCESS_TOKEN_EXPIRES_AT
+ALIBABA_REFRESH_TOKEN_EXPIRES_AT
+```
+
+서버는 access token 오류가 발생하면 refresh token으로 1회 자동 갱신 후 재시도합니다. refresh token까지 만료되면 응답에 `reauthorization_required`, `authorize_url`, `callback_url`을 포함합니다.
 
 ## 다음 개발 우선순위
 
