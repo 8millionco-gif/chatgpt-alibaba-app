@@ -323,6 +323,26 @@ function getMcpTools() {
       }
     },
     {
+      name: "exchange_alibaba_authorization_code",
+      title: "Exchange Alibaba authorization code",
+      description: "Exchange a fresh Alibaba OAuth authorization code for access and refresh tokens. This updates server memory and returns safe token status without exposing raw token values.",
+      inputSchema: {
+        type: "object",
+        required: ["code"],
+        properties: {
+          code: {
+            type: "string",
+            description: "Fresh one-time OAuth code from the Alibaba callback URL."
+          }
+        }
+      },
+      annotations: {
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true
+      }
+    },
+    {
       name: "search_alibaba_products",
       title: "Search Alibaba products",
       description: "Search the seller's Alibaba products by keyword and return product titles, ids, images, and URLs when available.",
@@ -701,6 +721,9 @@ async function callMcpTool(params = {}) {
     case "refresh_alibaba_access_token":
       return mcpToolResult(await refreshAlibabaAccessToken({ force: args.force !== false }), "Alibaba access token을 수동 갱신했습니다.");
 
+    case "exchange_alibaba_authorization_code":
+      return mcpToolResult(await exchangeAlibabaCodeForMcp(args), "Alibaba OAuth code로 새 토큰을 발급했습니다.");
+
     case "search_alibaba_products":
       return mcpToolResult(await searchProducts(args), "Alibaba 상품 검색 결과입니다.");
 
@@ -801,6 +824,20 @@ function summarizeForMcpText(value) {
   }
   if (value.clone_draft) {
     return formatProductCloneDraftText(value);
+  }
+  if (value.tokenExchanged) {
+    return [
+      "[토큰 발급 완료]",
+      `- Access Token: ${value.hasAccessToken ? "있음" : "없음"}`,
+      `- Refresh Token: ${value.hasRefreshToken ? "있음" : "없음"}`,
+      value.accessTokenExpiresAt ? `- Access Token 만료 예정: ${value.accessTokenExpiresAt}` : "",
+      value.refreshTokenExpiresAt ? `- Refresh Token 만료 예정: ${value.refreshTokenExpiresAt}` : "",
+      value.tokenUpdate?.accessTokenChanged !== undefined ? `- 새 Access Token 반영: ${value.tokenUpdate.accessTokenChanged ? "예" : "아니오"}` : "",
+      value.tokenUpdate?.refreshTokenChanged !== undefined ? `- 새 Refresh Token 반영: ${value.tokenUpdate.refreshTokenChanged ? "예" : "아니오"}` : "",
+      "",
+      value.next_step_ko || "",
+      value.warning_ko || ""
+    ].filter(Boolean).join("\n");
   }
   if (value.listing_preparation) {
     return formatListingPreparationText(value);
@@ -1186,17 +1223,26 @@ async function exchangeAlibabaCode(input = {}) {
     code
   });
 
-  const token = findDeepValue(response, "access_token");
-  const refreshToken = findDeepValue(response, "refresh_token");
-  const userId = findDeepValue(response, "user_id");
-  const userNick = findDeepValue(response, "user_nick");
-  const expiresIn = findDeepValue(response, "expires_in");
-  const refreshExpiresIn = findDeepValue(response, "refresh_expires_in");
-  const expireTime = findDeepValue(response, "expire_time");
+  const token = findDeepValueAny(response, ["access_token", "accessToken"]);
+  const refreshToken = findDeepValueAny(response, ["refresh_token", "refreshToken"]);
+  const userId = findDeepValueAny(response, ["user_id", "userId"]);
+  const userNick = findDeepValueAny(response, ["user_nick", "userNick", "account", "loginId"]);
+  const expiresIn = findDeepValueAny(response, ["expires_in", "expiresIn", "access_token_expires_in", "accessTokenExpiresIn"]);
+  const refreshExpiresIn = findDeepValueAny(response, ["refresh_expires_in", "refreshExpiresIn", "refresh_token_expires_in", "refreshTokenExpiresIn"]);
+  const expireTime = findDeepValueAny(response, ["expire_time", "expireTime"]);
 
-  if (token) {
-    updateAlibabaTokenState(response);
+  if (!token) {
+    const error = new Error("Alibaba token create response did not include an access token.");
+    error.statusCode = 502;
+    error.code = "ALIBABA_TOKEN_CREATE_RESPONSE_MISSING_ACCESS_TOKEN";
+    error.details = removeUndefined({
+      response_code: findDeepValue(response, "code"),
+      response_message: findDeepValue(response, "message") || findDeepValue(response, "msg")
+    });
+    throw error;
   }
+
+  const update = updateAlibabaTokenState(response);
 
   return {
     ok: true,
@@ -1210,10 +1256,37 @@ async function exchangeAlibabaCode(input = {}) {
     access_token_expires_at: toIsoOrNull(tokenState.accessTokenExpiresAt),
     refresh_token_expires_at: toIsoOrNull(tokenState.refreshTokenExpiresAt),
     expire_time: expireTime,
+    token_update: update,
     raw: response,
-    next_step: token
-      ? "Add access_token and refresh_token to Render. The server can automatically refresh the access token when ALIBABA_REFRESH_TOKEN is configured."
-      : "Token fields were not found in the response. Check raw response."
+    next_step: "Add access_token and refresh_token to Render. The server can automatically refresh the access token when ALIBABA_REFRESH_TOKEN is configured."
+  };
+}
+
+async function exchangeAlibabaCodeForMcp(input = {}) {
+  const result = await exchangeAlibabaCode(input);
+  return {
+    ok: true,
+    tokenExchanged: true,
+    source: result.source,
+    hasAccessToken: Boolean(tokenState.accessToken),
+    hasRefreshToken: Boolean(tokenState.refreshToken),
+    accessTokenFingerprint: tokenFingerprint(tokenState.accessToken),
+    refreshTokenFingerprint: tokenFingerprint(tokenState.refreshToken),
+    accessTokenExpiresAt: toIsoOrNull(tokenState.accessTokenExpiresAt),
+    refreshTokenExpiresAt: toIsoOrNull(tokenState.refreshTokenExpiresAt),
+    lastRefreshAt: toIsoOrNull(tokenState.lastRefreshAt),
+    userId: result.user_id,
+    userNick: result.user_nick,
+    tokenUpdate: removeUndefined({
+      accessTokenUpdated: result.token_update?.accessTokenUpdated,
+      accessTokenChanged: result.token_update?.accessTokenChanged,
+      refreshTokenUpdated: result.token_update?.refreshTokenUpdated,
+      refreshTokenChanged: result.token_update?.refreshTokenChanged,
+      expiresIn: result.token_update?.expiresIn,
+      refreshExpiresIn: result.token_update?.refreshExpiresIn
+    }),
+    next_step_ko: "새 토큰은 현재 서버 메모리에 반영되었습니다. Render가 재시작된 뒤에도 유지하려면 REST /api/alibaba/oauth/token 응답의 토큰 값을 Render 환경변수에 저장해야 합니다.",
+    warning_ko: "OAuth code는 1회용이며 빠르게 만료됩니다. 실패하면 새 재인증 URL에서 code를 다시 발급받으세요."
   };
 }
 
