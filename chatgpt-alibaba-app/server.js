@@ -32,6 +32,7 @@ const config = {
 const MCP_PROTOCOL_VERSION = "2025-06-18";
 const APP_VERSION = "0.2.0";
 const TOKEN_REFRESH_SAFETY_MS = 5 * 60 * 1000;
+const TOKEN_UNKNOWN_EXPIRY_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 const ALIBABA_PRODUCT_LISTING_API = "/alibaba/icbu/product/listing/v2";
 const PRODUCT_PUBLISH_CONFIRMATION_PHRASE = "등록 실행";
 
@@ -1226,6 +1227,8 @@ function buildAlibabaConnectionStatus(baseUrl = config.baseUrl) {
     topAppKeyUsesRestAppKey: config.alibabaTopAppKey === config.alibabaAppKey,
     hasAccessToken: Boolean(tokenState.accessToken),
     hasRefreshToken: Boolean(tokenState.refreshToken),
+    accessTokenFingerprint: tokenFingerprint(tokenState.accessToken),
+    refreshTokenFingerprint: tokenFingerprint(tokenState.refreshToken),
     accessTokenExpiresAt: toIsoOrNull(tokenState.accessTokenExpiresAt),
     refreshTokenExpiresAt: toIsoOrNull(tokenState.refreshTokenExpiresAt),
     lastRefreshAt: toIsoOrNull(tokenState.lastRefreshAt),
@@ -1321,7 +1324,7 @@ async function refreshAlibabaAccessToken(options = {}) {
     throw error;
   }
 
-  if (!options.force && tokenState.accessToken && !isTokenExpiringSoon(tokenState.accessTokenExpiresAt)) {
+  if (!options.force && tokenState.accessToken && tokenState.accessTokenExpiresAt && !isTokenExpiringSoon(tokenState.accessTokenExpiresAt)) {
     return safeAlibabaTokenStatus(false);
   }
 
@@ -1329,20 +1332,41 @@ async function refreshAlibabaAccessToken(options = {}) {
     refresh_token: refreshToken
   });
 
-  updateAlibabaTokenState(response, refreshToken);
-  return safeAlibabaTokenStatus(true);
+  const update = updateAlibabaTokenState(response, refreshToken);
+  if (!update.accessTokenUpdated) {
+    const error = new Error("Alibaba refresh succeeded but no access token was returned.");
+    error.statusCode = 502;
+    error.code = "ALIBABA_REFRESH_TOKEN_RESPONSE_MISSING_ACCESS_TOKEN";
+    error.details = removeUndefined({
+      response_code: findDeepValue(response, "code"),
+      response_message: findDeepValue(response, "message") || findDeepValue(response, "msg"),
+      has_refresh_token: Boolean(refreshToken)
+    });
+    throw error;
+  }
+
+  return safeAlibabaTokenStatus(true, update);
 }
 
 async function getAlibabaAccessToken() {
-  if (tokenState.accessToken && !isTokenExpiringSoon(tokenState.accessTokenExpiresAt)) {
+  if (tokenState.accessToken && !shouldRefreshAlibabaAccessTokenBeforeUse()) {
     return tokenState.accessToken;
   }
 
   if (tokenState.refreshToken) {
-    await refreshAlibabaAccessToken({ force: !tokenState.accessToken || isTokenExpiringSoon(tokenState.accessTokenExpiresAt) });
+    await refreshAlibabaAccessToken({ force: true });
   }
 
   return tokenState.accessToken;
+}
+
+function shouldRefreshAlibabaAccessTokenBeforeUse() {
+  if (!tokenState.accessToken) return true;
+  if (isTokenExpiringSoon(tokenState.accessTokenExpiresAt)) return true;
+  if (!tokenState.accessTokenExpiresAt) {
+    return !tokenState.lastRefreshAt || Date.now() - tokenState.lastRefreshAt > TOKEN_UNKNOWN_EXPIRY_REFRESH_INTERVAL_MS;
+  }
+  return false;
 }
 
 async function callAlibabaRestWithAccessToken(apiPath, params = {}, options = {}) {
@@ -1396,16 +1420,20 @@ function createAlibabaReauthorizationError(originalError, refreshError) {
     original_code: originalError?.code,
     original_message: originalError?.message,
     refresh_code: refreshError?.code,
-    refresh_message: refreshError?.message
+    refresh_message: refreshError?.message,
+    access_token_fingerprint: tokenFingerprint(tokenState.accessToken),
+    last_refresh_at: toIsoOrNull(tokenState.lastRefreshAt)
   });
   return error;
 }
 
 function updateAlibabaTokenState(response, fallbackRefreshToken = tokenState.refreshToken) {
-  const token = findDeepValue(response, "access_token");
-  const refreshToken = findDeepValue(response, "refresh_token") || fallbackRefreshToken;
-  const expiresIn = Number(findDeepValue(response, "expires_in") || 0);
-  const refreshExpiresIn = Number(findDeepValue(response, "refresh_expires_in") || 0);
+  const previousAccessTokenFingerprint = tokenFingerprint(tokenState.accessToken);
+  const previousRefreshTokenFingerprint = tokenFingerprint(tokenState.refreshToken);
+  const token = findDeepValueAny(response, ["access_token", "accessToken"]);
+  const refreshToken = findDeepValueAny(response, ["refresh_token", "refreshToken"]) || fallbackRefreshToken;
+  const expiresIn = Number(findDeepValueAny(response, ["expires_in", "expiresIn", "access_token_expires_in", "accessTokenExpiresIn"]) || 0);
+  const refreshExpiresIn = Number(findDeepValueAny(response, ["refresh_expires_in", "refreshExpiresIn", "refresh_token_expires_in", "refreshTokenExpiresIn"]) || 0);
 
   if (token) {
     tokenState.accessToken = token;
@@ -1422,17 +1450,38 @@ function updateAlibabaTokenState(response, fallbackRefreshToken = tokenState.ref
     tokenState.refreshTokenExpiresAt = Date.now() + refreshExpiresIn * 1000;
   }
   tokenState.lastRefreshAt = Date.now();
+
+  return {
+    accessTokenUpdated: Boolean(token),
+    refreshTokenUpdated: Boolean(refreshToken),
+    accessTokenChanged: previousAccessTokenFingerprint !== tokenFingerprint(tokenState.accessToken),
+    refreshTokenChanged: previousRefreshTokenFingerprint !== tokenFingerprint(tokenState.refreshToken),
+    expiresIn: expiresIn || undefined,
+    refreshExpiresIn: refreshExpiresIn || undefined,
+    accessTokenFingerprint: tokenFingerprint(tokenState.accessToken),
+    refreshTokenFingerprint: tokenFingerprint(tokenState.refreshToken)
+  };
 }
 
-function safeAlibabaTokenStatus(refreshed) {
+function safeAlibabaTokenStatus(refreshed, update = {}) {
   return {
     ok: true,
     refreshed,
     hasAccessToken: Boolean(tokenState.accessToken),
     hasRefreshToken: Boolean(tokenState.refreshToken),
+    accessTokenFingerprint: tokenFingerprint(tokenState.accessToken),
+    refreshTokenFingerprint: tokenFingerprint(tokenState.refreshToken),
     accessTokenExpiresAt: toIsoOrNull(tokenState.accessTokenExpiresAt),
     refreshTokenExpiresAt: toIsoOrNull(tokenState.refreshTokenExpiresAt),
     lastRefreshAt: toIsoOrNull(tokenState.lastRefreshAt),
+    tokenUpdate: removeUndefined({
+      accessTokenUpdated: update.accessTokenUpdated,
+      accessTokenChanged: update.accessTokenChanged,
+      refreshTokenUpdated: update.refreshTokenUpdated,
+      refreshTokenChanged: update.refreshTokenChanged,
+      expiresIn: update.expiresIn,
+      refreshExpiresIn: update.refreshExpiresIn
+    }),
     note: refreshed
       ? "Alibaba access token was refreshed in server memory. Update Render environment variables with the newest tokens if you need persistence across restarts."
       : "Alibaba access token is still valid or no refresh was needed."
@@ -3547,6 +3596,19 @@ function findDeepValue(value, targetKey) {
     if (result !== undefined) return result;
   }
   return undefined;
+}
+
+function findDeepValueAny(value, targetKeys = []) {
+  for (const key of targetKeys) {
+    const result = findDeepValue(value, key);
+    if (result !== undefined && result !== null && result !== "") return result;
+  }
+  return undefined;
+}
+
+function tokenFingerprint(token) {
+  if (!token) return null;
+  return crypto.createHash("sha256").update(String(token), "utf8").digest("hex").slice(0, 12);
 }
 
 function formatGmt8(date) {

@@ -176,7 +176,7 @@ ALIBABA_ACCESS_TOKEN_EXPIRES_AT
 ALIBABA_REFRESH_TOKEN_EXPIRES_AT
 ```
 
-서버는 access token 오류가 발생하면 refresh token으로 1회 자동 갱신 후 재시도합니다. refresh token까지 만료되면 응답에 `reauthorization_required`, `authorize_url`, `callback_url`을 포함합니다.
+서버는 access token 오류가 발생하면 refresh token으로 1회 자동 갱신 후 재시도합니다. access token 만료 시각이 저장되어 있지 않은 경우에도 일정 시간이 지나면 API 호출 전에 먼저 갱신을 시도합니다. refresh token까지 만료되면 응답에 `reauthorization_required`, `authorize_url`, `callback_url`을 포함합니다.
 
 ChatGPT 앱 안에서 즉시 갱신을 시도하려면 아래처럼 요청합니다.
 
@@ -184,7 +184,7 @@ ChatGPT 앱 안에서 즉시 갱신을 시도하려면 아래처럼 요청합니
 알리바바 access token을 수동 갱신해줘.
 ```
 
-이 기능은 서버 메모리의 토큰을 갱신하고 만료 예정 시간을 확인합니다. 원본 토큰 값은 ChatGPT 응답에 노출하지 않습니다. Render 서비스가 재시작된 뒤에도 새 토큰을 유지하려면 OAuth 재인증 또는 별도 저장소 연동으로 Render 환경변수를 업데이트해야 합니다.
+이 기능은 서버 메모리의 토큰을 갱신하고 만료 예정 시간을 확인합니다. 원본 토큰 값은 ChatGPT 응답에 노출하지 않습니다. 대신 `accessTokenFingerprint`와 `tokenUpdate.accessTokenChanged`로 실제 새 토큰이 반영됐는지 확인할 수 있습니다. Render 서비스가 재시작된 뒤에도 새 토큰을 유지하려면 OAuth 재인증 또는 별도 저장소 연동으로 Render 환경변수를 업데이트해야 합니다.
 
 ## 다음 개발 우선순위
 
