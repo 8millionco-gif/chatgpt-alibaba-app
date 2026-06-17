@@ -167,8 +167,9 @@ https://chatgpt-alibaba-app.onrender.com/api/alibaba/oauth/authorize-url
 ```
 
 3. `authorize_url`을 브라우저에서 열어 Alibaba 승인을 완료합니다.
-4. callback 화면에 표시된 `code`로 `/api/alibaba/oauth/token`을 호출해 새 토큰을 발급합니다.
-5. Render 환경변수의 아래 값을 새 값으로 교체한 뒤 재배포합니다.
+4. callback URL이 열리면 서버가 `code`를 자동으로 토큰 교환 API에 전달합니다.
+5. 화면에 `Alibaba token exchange completed`가 표시되면 서버 메모리에 새 토큰이 반영된 상태입니다.
+6. Render 환경변수의 아래 값을 새 값으로 교체한 뒤 재배포합니다.
 
 ```text
 ALIBABA_ACCESS_TOKEN
@@ -187,13 +188,7 @@ ChatGPT 앱 안에서 즉시 갱신을 시도하려면 아래처럼 요청합니
 
 이 기능은 서버 메모리의 토큰을 갱신하고 만료 예정 시간을 확인합니다. 원본 토큰 값은 ChatGPT 응답에 노출하지 않습니다. 대신 `accessTokenFingerprint`와 `tokenUpdate.accessTokenChanged`로 실제 새 토큰이 반영됐는지 확인할 수 있습니다. Render 서비스가 재시작된 뒤에도 새 토큰을 유지하려면 OAuth 재인증 또는 별도 저장소 연동으로 Render 환경변수를 업데이트해야 합니다.
 
-OAuth callback에서 받은 새 `code`를 ChatGPT 앱 안에서 교환하려면 아래처럼 요청합니다.
-
-```text
-이 code로 알리바바 토큰을 발급해줘: 여기에_code_붙여넣기
-```
-
-이 도구는 새 토큰을 서버 메모리에 반영하지만 ChatGPT 응답에 원본 토큰을 노출하지 않습니다. `code`는 1회용이며 짧은 시간 안에 만료되므로, 실패하면 재인증 URL에서 새 code를 다시 발급받아야 합니다.
+OAuth callback에서 받은 `code`는 ChatGPT 대화창에 붙여넣지 않는 것이 안전합니다. callback 서버가 자동으로 code를 교환하므로, 브라우저에서 승인 완료 화면만 확인하면 됩니다. `code`는 1회용이며 짧은 시간 안에 만료되므로, 실패하면 재인증 URL에서 새 code를 다시 발급받아야 합니다.
 
 ## 다음 개발 우선순위
 
@@ -234,10 +229,6 @@ OAuth callback에서 받은 새 `code`를 ChatGPT 앱 안에서 교환하려면 
 
 ```text
 알리바바 access token을 수동 갱신하고, 연결 상태를 다시 확인해줘.
-```
-
-```text
-이 code로 알리바바 토큰을 발급해줘: 여기에_code_붙여넣기
 ```
 
 ```text

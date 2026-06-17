@@ -66,7 +66,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (routeKey === "GET /api/alibaba/oauth/callback") {
-      return sendOAuthCallback(res, url);
+      return await sendOAuthCallback(res, url);
     }
 
     if (url.pathname === "/mcp") {
@@ -1326,7 +1326,7 @@ function buildAlibabaTokenHealth(baseUrl = config.baseUrl) {
       can_auto_refresh: false,
       reauthorization_required: true,
       authorize_url: buildAlibabaAuthorizeUrl(baseUrl),
-      next_step_ko: "Alibaba OAuth 재인증으로 새 access_token과 refresh_token을 발급받아 Render 환경변수에 저장하세요."
+      next_step_ko: "Alibaba OAuth 재인증이 필요합니다. authorize_url을 열어 승인하면 callback 서버가 code를 자동으로 새 access_token/refresh_token으로 교환합니다."
     };
   }
 
@@ -1336,7 +1336,7 @@ function buildAlibabaTokenHealth(baseUrl = config.baseUrl) {
       can_auto_refresh: false,
       reauthorization_required: true,
       authorize_url: buildAlibabaAuthorizeUrl(baseUrl),
-      next_step_ko: "Refresh token이 만료되었습니다. Alibaba OAuth 재인증이 필요합니다."
+      next_step_ko: "Refresh token이 만료되었습니다. authorize_url을 열어 Alibaba OAuth 재인증을 완료하세요. callback 서버가 code를 자동으로 토큰으로 교환합니다."
     };
   }
 
@@ -1371,7 +1371,7 @@ function buildAlibabaAuthorizeUrlResult(baseUrl = config.baseUrl, state = "") {
     ok: true,
     authorize_url: buildAlibabaAuthorizeUrl(baseUrl, state),
     callback_url: buildAlibabaCallbackUrl(baseUrl),
-    next_step_ko: "authorize_url을 브라우저에서 열어 Alibaba 로그인/승인을 완료한 뒤 callback에 표시되는 code를 /api/alibaba/oauth/token에 전달하세요."
+    next_step_ko: "authorize_url을 브라우저에서 열어 Alibaba 로그인/승인을 완료하세요. callback URL이 열리면 서버가 code를 자동으로 새 access_token/refresh_token으로 교환합니다."
   };
 }
 
@@ -3771,7 +3771,7 @@ function formatErrorPayload(error, req) {
       reauthorization_required: true,
       authorize_url: buildAlibabaAuthorizeUrl(baseUrl),
       callback_url: buildAlibabaCallbackUrl(baseUrl),
-      next_step_ko: "Alibaba access token 또는 refresh token이 만료되었습니다. authorize_url에서 재인증한 뒤 새 access_token/refresh_token을 Render 환경변수에 저장하고 재배포하세요.",
+      next_step_ko: "Alibaba access token 또는 refresh token이 만료되었습니다. authorize_url에서 재인증하세요. callback URL이 열리면 서버가 code를 자동으로 새 access_token/refresh_token으로 교환합니다. 장기 유지가 필요하면 새 토큰을 Render 환경변수에도 저장하세요.",
       token_error: removeUndefined({
         original_code: error.details?.original_code || error.code,
         original_message: error.details?.original_message || error.message,
@@ -3840,20 +3840,44 @@ function sendJson(res, statusCode, payload) {
   res.end(JSON.stringify(payload, null, 2));
 }
 
-function sendOAuthCallback(res, url) {
+async function sendOAuthCallback(res, url) {
   const code = url.searchParams.get("code") || "";
   const state = url.searchParams.get("state") || "";
   const error = url.searchParams.get("error") || "";
   const errorDescription = url.searchParams.get("error_description") || "";
 
-  const content = error
+  let statusCode = error ? 400 : 200;
+  let content = error
     ? `<h1>Alibaba authorization failed</h1><p>${escapeHtml(error)}</p><p>${escapeHtml(errorDescription)}</p>`
-    : `<h1>Alibaba authorization received</h1>
-       <p>Copy this authorization code and exchange it for an access token in your backend setup flow.</p>
-       <pre>${escapeHtml(code || "No code parameter was returned.")}</pre>
-       ${state ? `<p>State: ${escapeHtml(state)}</p>` : ""}`;
+    : `<h1>Alibaba authorization received</h1><p>No code parameter was returned.</p>`;
 
-  res.writeHead(error ? 400 : 200, { "Content-Type": "text/html; charset=utf-8" });
+  if (!error && code) {
+    try {
+      const result = await exchangeAlibabaCodeForMcp({ code });
+      content = `<h1>Alibaba token exchange completed</h1>
+        <p>The authorization code was exchanged on the server. Raw tokens are not shown on this page.</p>
+        <ul>
+          <li>Access Token: ${result.hasAccessToken ? "available" : "missing"}</li>
+          <li>Refresh Token: ${result.hasRefreshToken ? "available" : "missing"}</li>
+          <li>Access Token Fingerprint: ${escapeHtml(result.accessTokenFingerprint || "")}</li>
+          <li>Refresh Token Fingerprint: ${escapeHtml(result.refreshTokenFingerprint || "")}</li>
+          <li>Access Token Expires At: ${escapeHtml(result.accessTokenExpiresAt || "unknown")}</li>
+          <li>Refresh Token Expires At: ${escapeHtml(result.refreshTokenExpiresAt || "unknown")}</li>
+        </ul>
+        <p>You can close this page and ask ChatGPT to check the Alibaba connection status.</p>
+        <p>For persistence after a Render restart, update the Render environment variables using a secure backend/admin flow.</p>
+        ${state ? `<p>State: ${escapeHtml(state)}</p>` : ""}`;
+    } catch (exchangeError) {
+      statusCode = exchangeError.statusCode || 502;
+      content = `<h1>Alibaba token exchange failed</h1>
+        <p>${escapeHtml(exchangeError.message)}</p>
+        <p>Get a fresh authorization URL and try again. The OAuth code is one-time use and expires quickly.</p>
+        ${exchangeError.code ? `<p>Error code: ${escapeHtml(exchangeError.code)}</p>` : ""}
+        ${state ? `<p>State: ${escapeHtml(state)}</p>` : ""}`;
+    }
+  }
+
+  res.writeHead(statusCode, { "Content-Type": "text/html; charset=utf-8" });
   res.end(`<!doctype html><html><head><meta charset="utf-8"><title>Alibaba OAuth Callback</title></head><body>${content}</body></html>`);
 }
 
