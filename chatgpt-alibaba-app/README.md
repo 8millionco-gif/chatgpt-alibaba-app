@@ -103,6 +103,7 @@ ChatGPT Settings
 현재 MCP 도구:
 
 - `alibaba_connection_status`
+- `refresh_alibaba_access_token`
 - `search_alibaba_products`
 - `draft_optimized_product_clone`
 - `prepare_product_listing_payload`
@@ -177,6 +178,14 @@ ALIBABA_REFRESH_TOKEN_EXPIRES_AT
 
 서버는 access token 오류가 발생하면 refresh token으로 1회 자동 갱신 후 재시도합니다. refresh token까지 만료되면 응답에 `reauthorization_required`, `authorize_url`, `callback_url`을 포함합니다.
 
+ChatGPT 앱 안에서 즉시 갱신을 시도하려면 아래처럼 요청합니다.
+
+```text
+알리바바 access token을 수동 갱신해줘.
+```
+
+이 기능은 서버 메모리의 토큰을 갱신하고 만료 예정 시간을 확인합니다. 원본 토큰 값은 ChatGPT 응답에 노출하지 않습니다. Render 서비스가 재시작된 뒤에도 새 토큰을 유지하려면 OAuth 재인증 또는 별도 저장소 연동으로 Render 환경변수를 업데이트해야 합니다.
+
 ## 다음 개발 우선순위
 
 1. 완료: 바이어 대화 기반 추천 답변 품질 개선
@@ -212,6 +221,10 @@ ALIBABA_REFRESH_TOKEN_EXPIRES_AT
 
 ```text
 알리바바에서 blemish 상품 5개를 검색하고, 표와 복사용 URL 목록으로 정리해줘.
+```
+
+```text
+알리바바 access token을 수동 갱신하고, 연결 상태를 다시 확인해줘.
 ```
 
 ```text

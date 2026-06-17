@@ -273,19 +273,17 @@ async function handleMcpMessage(message, req) {
         return jsonRpcError(id, -32601, `Method not found: ${message.method}`);
     }
   } catch (error) {
+    const structuredError = formatErrorPayload(error, req);
+    const nextStep = structuredError.next_step_ko ? `\n\n다음 조치: ${structuredError.next_step_ko}` : "";
     return jsonRpcResult(id, {
       isError: true,
       content: [
         {
           type: "text",
-          text: `요청 처리 중 오류가 발생했습니다: ${error.message}`
+          text: `요청 처리 중 오류가 발생했습니다: ${structuredError.error}${nextStep}`
         }
       ],
-      structuredContent: {
-        ok: false,
-        error: error.message,
-        code: error.code || "MCP_TOOL_ERROR"
-      }
+      structuredContent: structuredError
     });
   }
 }
@@ -302,6 +300,25 @@ function getMcpTools() {
       },
       annotations: {
         readOnlyHint: true
+      }
+    },
+    {
+      name: "refresh_alibaba_access_token",
+      title: "Refresh Alibaba access token",
+      description: "Manually refresh the Alibaba access token using the configured refresh token. This updates server memory and returns expiry status without exposing raw token values.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          force: {
+            type: "boolean",
+            description: "When true, refresh even if the current token is not known to be expiring. Defaults to true."
+          }
+        }
+      },
+      annotations: {
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true
       }
     },
     {
@@ -679,6 +696,9 @@ async function callMcpTool(params = {}) {
   switch (name) {
     case "alibaba_connection_status":
       return mcpToolResult(buildAlibabaConnectionStatus(config.baseUrl), "Alibaba 연결 상태를 확인했습니다.");
+
+    case "refresh_alibaba_access_token":
+      return mcpToolResult(await refreshAlibabaAccessToken({ force: args.force !== false }), "Alibaba access token을 수동 갱신했습니다.");
 
     case "search_alibaba_products":
       return mcpToolResult(await searchProducts(args), "Alibaba 상품 검색 결과입니다.");
